@@ -1,0 +1,140 @@
+# Job Bot configuration.
+# Secrets (GEMINI_API_KEY, NOTION_TOKEN, NOTION_DATA_SOURCE_ID, NTFY_TOPIC) come from the environment:
+# a local .env file, or repository secrets in GitHub Actions.
+
+term: Summer 2027
+state_path: data/state.json
+
+sources:
+  simplify:
+    enabled: true
+    url: https://raw.githubusercontent.com/SimplifyJobs/Summer2027-Internships/dev/.github/scripts/listings.json
+  # Poll specific companies' boards directly to catch postings before the aggregator does.
+  ats_watchlist:
+    enabled: false
+    greenhouse: []   # board tokens from job-boards.greenhouse.io/<token>
+    lever: []        # company slugs from jobs.lever.co/<company>
+    ashby: []        # org slugs from jobs.ashbyhq.com/<org>
+
+# Title matching (case-insensitive regexes). A listing must match a role group to be considered.
+roles:
+  groups:
+    swe:
+      weight: 1.0
+      patterns:
+        - '\bsoftware\b'
+        - '\bswe\b'
+        - '\bdevelopers?\b'
+        - '\bprogrammer\b'
+        - '\b(front|back)[- ]?end\b'
+        - '\bfull[- ]?stack\b'
+        - '\bweb\b'
+        - '\bmobile\b'
+        - '\bios\b'
+        - '\bandroid\b'
+        - '\b(platform|infrastructure|cloud|devops|reliability|security|product|applications?|forward deployed) engineer'
+        - '\bsre\b'
+        - '\bcomputer science\b'
+    ux:
+      weight: 1.0
+      patterns:
+        - '\bux\b'
+        - '\bui\b'
+        - '\buser (experience|interface|research)\b'
+        - '\b(product|interaction|visual|experience|web) design'
+        - '\bdesign (engineer|technologist)'
+        - '\bdesigner\b'
+        - '\bhuman[- ]computer interaction\b'
+        - '\bhci\b'
+        - '\bcreative technologist\b'
+    embedded:
+      weight: 0.8
+      patterns:
+        - '\bembedded\b'
+        - '\bfirmware\b'
+        - '\bsystems? software\b'
+        - '\brobotics\b'
+        - '\bautonomy\b'
+        - '\bfpga\b'
+        - '\bcomputer engineer'
+        - '\bhardware\b'
+    generic:
+      weight: 0.5
+      overrides_soft_exclude: false
+      patterns:
+        - '\bengineer(ing)?\b'
+        - '\btechnology\b'
+        - '\bmultiple teams\b'
+  # Always dropped (degree level / seniority).
+  hard_exclude:
+    - '\bph\.?\s?d\b'
+    - '\bmba\b'
+    - '\bmaster''?s\b'
+    - '\b(senior|sr\.|staff|principal|director|manager)\b'
+  # Dropped unless the title also matches swe/ux/embedded ("Software Engineer - Trading" survives).
+  soft_exclude:
+    - '\bproduct manag'
+    - '\bsales\b'
+    - '\bmarketing\b'
+    - '\b(accounting|finance|financial|audit|tax|legal|compliance|recruiting|human resources)\b'
+    - '\b(mechanical|civil|chemical|manufacturing|process|industrial|materials|structural|aerospace) engineer'
+    - '\bquantitative\b'
+    - '\btrad(er|ing)\b'
+    - '\bresearch scientist\b'
+    - '\bdata (scien|analy)'
+    - '\bbusiness\b'
+    - '\bsupply chain\b'
+    - '\boperations\b'
+
+# Free pre-score (0-100): keyword overlap with your skills + local embedding similarity.
+# Orders the LLM queue; listings below min_score never use LLM quota.
+prefilter:
+  min_score: 20
+  keyword_weight: 0.45
+  embedding_weight: 0.55
+  keyword_saturation: 6        # this many distinct skill hits = full keyword score
+  use_embeddings: true
+  embedding_model: BAAI/bge-small-en-v1.5
+  similarity_floor: 0.55       # cosine similarity mapped to 0
+  similarity_ceiling: 0.85     # cosine similarity mapped to 100
+
+jd:
+  min_chars: 300               # shorter than this counts as "no job description"
+  max_chars: 30000             # longer JDs are skipped with a warning rather than truncated
+  concurrency: 8
+  timeout_seconds: 20
+
+llm:
+  model: gemini-3.8-flash
+  rpm: 10                      # free-tier requests per minute (see AI Studio > Rate limits)
+  daily_budget: null           # optional local cap per UTC day; null = run until Google says the quota is used up
+  max_per_run: 120
+  max_attempts: 3              # give up on a listing after this many unusable responses
+
+scoring:
+  fit_weight: 0.85
+  logistics_weight: 0.15
+  eligibility_cap: 40          # max score when the posting's grad window / degree clearly excludes you
+  unknown_pay_factor: 0.95
+  # Preference order: in-person + relocation + paid > remote + paid > in-person + paid > remote unpaid > in-person unpaid
+  logistics:
+    onsite_relocation_paid: 100
+    remote_paid: 85
+    onsite_paid: 70
+    remote_unpaid: 35
+    onsite_unpaid: 20
+
+tiers:
+  notify_threshold: 80         # push notification + Notion
+  good_threshold: 65           # Notion
+  track_threshold: 50          # Notion; below this is only kept in state
+
+notify:
+  enabled: true
+  server: https://ntfy.sh
+  max_per_run: 8               # extra strong matches in one run are folded into a digest
+  notify_without_jd: false     # push even when the job description couldn't be read
+
+notion:
+  enabled: true
+  requests_per_second: 2.5
