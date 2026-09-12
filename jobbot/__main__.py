@@ -18,6 +18,9 @@ MODE = {"onsite": "onsite", "hybrid": "hybrid", "remote": "remote", "unknown": "
 
 
 def print_table(rows: list[ListingState]) -> None:
+    if not rows:
+        print("\n(no scored listings)")
+        return
     print(f"\n{'score':>5}  {'tier':<8} {'mode':<6} {'paid':<7} {'reloc':<7} {'jd':<3} company / title")
     for ls in rows:
         a = ls.analysis
@@ -59,6 +62,7 @@ def cmd_show(settings: Settings, args: argparse.Namespace) -> int:
 def cmd_rescore(settings: Settings, args: argparse.Namespace) -> int:
     state = State.load(settings.state_path)
     ids = [ls.id for ls in state.listings.values() if ls.status == "scored"] if args.ids == ["all"] else args.ids
+    queued = 0
     for listing_id in ids:
         ls = state.listings.get(listing_id)
         if ls is None:
@@ -67,9 +71,11 @@ def cmd_rescore(settings: Settings, args: argparse.Namespace) -> int:
         ls.status, ls.filter_reason, ls.llm_failures = "pending", None, 0
         if ls.analysis is None:
             ls.prescore = None
-    state.save(settings.state_path)
-    print(f"Queued {len(ids)} listing(s) for scoring on the next run.")
-    return 0
+        queued += 1
+    if queued:
+        state.save(settings.state_path)
+    print(f"Queued {queued} listing(s) for scoring on the next run.")
+    return 0 if queued == len(ids) else 1
 
 
 def cmd_init_notion(settings: Settings, args: argparse.Namespace) -> int:

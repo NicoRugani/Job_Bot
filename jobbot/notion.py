@@ -144,7 +144,7 @@ def bot_properties(ls: ListingState) -> dict[str, Any]:
         "Paid": _select(a.paid.capitalize()),
         "Pay": {"rich_text": _text(a.pay_text)},
         "Relocation": _select(a.relocation_assistance.capitalize()),
-        "Location": {"rich_text": _text("; ".join(ls.locations))},
+        "Location": {"rich_text": _text("; ".join(dict.fromkeys(ls.locations + ls.other_locations)))},
         "Why it fits": {"rich_text": _text(a.summary)},
         "Gaps / red flags": {"rich_text": _text("; ".join(a.red_flags + a.gaps))},
         "Apply link": {"url": ls.url},

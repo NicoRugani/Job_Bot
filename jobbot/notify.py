@@ -27,7 +27,7 @@ def match_payload(ls: ListingState) -> dict:
     lines = [
         a.summary,
         "",
-        f"📍 {', '.join(ls.locations) or 'Location n/a'} · {MODE_LABEL[a.work_mode]}",
+        f"📍 {'; '.join(dict.fromkeys(ls.locations + ls.other_locations)) or 'Location n/a'} · {MODE_LABEL[a.work_mode]}",
         f"💵 {pay}",
         f"🚚 Relocation: {a.relocation_assistance}",
     ]

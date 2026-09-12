@@ -7,11 +7,14 @@ JD_TEXT = "Responsibilities: build React front-end features. Qualifications: Jav
 
 
 class FakeFetcher:
-    def __init__(self, missing=()):
+    def __init__(self, missing=(), same_text=False):
         self.missing = set(missing)
+        self.same_text = same_text
 
     def fetch(self, ls):
-        return None if ls.id in self.missing else JobDescription(text=JD_TEXT + ls.id, source="fake")
+        if ls.id in self.missing:
+            return None
+        return JobDescription(text=JD_TEXT if self.same_text else JD_TEXT + ls.id, source="fake")
 
     def fetch_many(self, items):
         return {ls.id: self.fetch(ls) for ls in items}
@@ -144,6 +147,36 @@ def test_dry_run_saves_nothing(settings, make_listing, make_analysis):
     report = run(settings, RunOptions(dry_run=True), deps)
     assert len(report.scored) == 1
     assert not settings.state_path.exists() and not notion.created and not notifier.sent
+
+
+def test_identical_postings_are_scored_once(settings, make_listing, make_analysis):
+    listings = [
+        make_listing(1, company="Amex", locations=["New York, NY"]),
+        make_listing(2, company="Amex", locations=["Phoenix, AZ"]),
+    ]
+    scorer = FakeScorer([make_analysis(fit_score=70)])
+    deps, notion, _ = make_deps(listings, scorer, fetcher=FakeFetcher(same_text=True))
+    run(settings, RunOptions(), deps)
+    state = State.load(settings.state_path)
+    assert len(scorer.prompts) == 1
+    assert state.listings["simplify:2"].status == "duplicate"
+    assert state.listings["simplify:1"].other_locations == ["Phoenix, AZ"]
+    assert notion.created[0]["Location"]["rich_text"][0]["text"]["content"] == "New York, NY; Phoenix, AZ"
+
+
+class LowPrescorer:
+    def score(self, title, body, role_weight):
+        return 1.0
+
+
+def test_low_prescore_only_filters_non_core_roles(settings, make_listing, make_analysis):
+    listings = [make_listing(1, title="Software Engineer Intern"), make_listing(2, title="Data Engineering Intern")]
+    deps, _, _ = make_deps(listings, FakeScorer([make_analysis()]))
+    deps.prescorer = lambda s: LowPrescorer()
+    run(settings, RunOptions(), deps)
+    state = State.load(settings.state_path)
+    assert state.listings["simplify:1"].status == "scored"
+    assert state.listings["simplify:2"].status == "filtered"
 
 
 def test_llm_limit_caps_calls(settings, make_listing, make_analysis):

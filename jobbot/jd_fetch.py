@@ -11,6 +11,7 @@ import json
 import logging
 import re
 import threading
+import time
 from collections import Counter
 from concurrent.futures import ThreadPoolExecutor
 from typing import Any
@@ -58,7 +59,16 @@ def html_to_text(markup: str) -> str:
     text = re.sub(r"<br\s*/?>|</(p|div|li|h[1-6]|tr|ul|ol|section)>", "\n", text, flags=re.I)
     text = re.sub(r"<li[^>]*>", "\n- ", text, flags=re.I)
     text = re.sub(r"<[^>]+>", " ", text)
-    return clean_text(htmllib.unescape(text))
+    text = htmllib.unescape(text)
+    # Some ATSs (Workday) double-escape numeric entities, e.g. "&amp;#xa;".
+    text = re.sub(r"&#x?[0-9a-f]+;", lambda m: htmllib.unescape(m.group()), text, flags=re.I)
+    return clean_text(text)
+
+
+def looks_like_job_description(text: str, min_chars: int) -> bool:
+    """Reject JavaScript walls, cookie banners and legal footers that extractors sometimes return."""
+    signals = {match.group().lower() for match in _JD_SIGNAL.finditer(text)}
+    return len(text) >= min_chars and len(signals) >= 2
 
 
 def _join(*parts: str | None) -> str:
@@ -69,10 +79,11 @@ def _money(amount: float) -> str:
     return f"{amount:,.0f}" if amount >= 1000 or amount == int(amount) else f"{amount:,.2f}"
 
 
-def greenhouse_board_guesses(url: str, company: str) -> list[str]:
+def greenhouse_board_guesses(url: str, company: str, known_boards: dict[str, str] | None = None) -> list[str]:
     """Custom career sites embed Greenhouse jobs as ?gh_jid=<id> without naming the board."""
     parts = urlsplit(url)
-    guesses: list[str] = []
+    host = parts.netloc.lower()
+    guesses = [board for domain, board in (known_boards or {}).items() if host == domain or host.endswith("." + domain)]
     if match := re.search(r"/job-board/([\w-]+)", parts.path):  # careerpuck-style embeds
         guesses += [match.group(1).replace("-", ""), match.group(1)]
     labels = [label for label in parts.netloc.lower().split(".") if label not in _GENERIC_HOST_LABELS]
@@ -88,9 +99,17 @@ class JDFetcher:
         self.cfg = cfg
         self.client = client
         self._ashby_boards: dict[str, dict[str, Any]] = {}
+        self._host_slots: dict[str, threading.Semaphore] = {}
         self._lock = threading.Lock()
 
     def fetch(self, ls: ListingState) -> JobDescription | None:
+        host = urlsplit(ls.url).netloc.lower()
+        with self._lock:
+            slot = self._host_slots.setdefault(host, threading.Semaphore(self.cfg.per_host_concurrency))
+        with slot:  # be polite to any single career site
+            return self._fetch(ls)
+
+    def _fetch(self, ls: ListingState) -> JobDescription | None:
         route = next((name for pattern, name in ROUTES if pattern.search(ls.url)), None)
         for extractor in ([route] if route else []) + ["generic"]:
             try:
@@ -98,7 +117,7 @@ class JDFetcher:
             except (httpx.HTTPError, ValueError, KeyError, TypeError, IndexError, AttributeError) as e:
                 log.debug("%s extractor failed for %s: %s", extractor, ls.url, e)
                 continue
-            if jd is None or len(jd.text) < self.cfg.min_chars or not _JD_SIGNAL.search(jd.text):
+            if jd is None or not looks_like_job_description(jd.text, self.cfg.min_chars):
                 continue
             if len(jd.text) > self.cfg.max_chars:
                 log.warning("Job description for %s is %d chars (limit %d); treating it as unavailable", ls.id, len(jd.text), self.cfg.max_chars)
@@ -115,8 +134,28 @@ class JDFetcher:
 
     # --- extractors ------------------------------------------------------------------------------
 
+    def _get(self, url: str, **kwargs: Any) -> httpx.Response:
+        """GET with one retry for transient failures (timeouts, 429, 5xx)."""
+        for attempt in range(2):
+            try:
+                response = self.client.get(url, **kwargs)
+            except httpx.TransportError:
+                if attempt:
+                    raise
+                time.sleep(2)
+                continue
+            if response.status_code in (429, 500, 502, 503, 504) and not attempt:
+                try:
+                    delay = min(10.0, float(response.headers.get("Retry-After", 2)))
+                except ValueError:
+                    delay = 2.0
+                time.sleep(delay)
+                continue
+            return response
+        raise AssertionError("unreachable")
+
     def _json(self, url: str, **kwargs: Any) -> Any:
-        response = self.client.get(url, headers={"Accept": "application/json"}, **kwargs)
+        response = self._get(url, headers={"Accept": "application/json"}, **kwargs)
         response.raise_for_status()
         return response.json()
 
@@ -127,13 +166,13 @@ class JDFetcher:
         job_id = (query.get("gh_jid") or query.get("token") or [None])[0]
         if not job_id:
             return None
-        for board in query.get("for") or greenhouse_board_guesses(url, company):
+        for board in query.get("for") or greenhouse_board_guesses(url, company, self.cfg.greenhouse_boards):
             if jd := self._greenhouse_job(board, job_id):
                 return jd
         return None
 
     def _greenhouse_job(self, board: str, job_id: str) -> JobDescription | None:
-        response = self.client.get(f"https://boards-api.greenhouse.io/v1/boards/{board}/jobs/{job_id}", params={"pay_transparency": "true"})
+        response = self._get(f"https://boards-api.greenhouse.io/v1/boards/{board}/jobs/{job_id}", params={"pay_transparency": "true"})
         if response.status_code == 404:
             return None
         response.raise_for_status()
@@ -268,12 +307,12 @@ class JDFetcher:
         match = re.match(r"(https://[^/]*icims\.com/jobs/\d+)", url)
         if not match:
             return None
-        response = self.client.get(f"{match.group(1)}/job?in_iframe=1")  # the iframe view is server-rendered
+        response = self._get(f"{match.group(1)}/job?in_iframe=1")  # the iframe view is server-rendered
         response.raise_for_status()
         return self._from_html(response.text, "icims")
 
     def _taleo(self, url: str, company: str) -> JobDescription | None:
-        response = self.client.get(url)
+        response = self._get(url)
         response.raise_for_status()
         match = re.search(r'id="initialHistory"[^>]*value="([^"]*)"', response.text)
         if not match:
@@ -283,7 +322,7 @@ class JDFetcher:
         return JobDescription(text=_join(*dict.fromkeys(html_to_text(p) for p in parts)), source="taleo")
 
     def _generic(self, url: str, company: str) -> JobDescription | None:
-        response = self.client.get(url)
+        response = self._get(url)
         response.raise_for_status()
         return self._from_html(response.text, "generic")
 

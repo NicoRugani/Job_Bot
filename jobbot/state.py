@@ -23,6 +23,7 @@ class ListingState(BaseModel):
     title: str
     url: str
     locations: list[str] = []
+    other_locations: list[str] = []  # from identical postings at other offices
     category: str | None = None
     degrees: list[str] = []
     date_posted: datetime | None = None

@@ -107,4 +107,5 @@ The first backfill of existing listings may take a few runs if the free Gemini q
 
 - **Missing roles, or noise getting through?** Edit `roles` regexes in `config.yaml`, then check with `python -m jobbot show`, which lists filter reasons.
 - **Dream companies:** enable `sources.ats_watchlist` and add Greenhouse, Lever or Ashby board slugs to catch postings before the aggregator lists them.
+- **"JD read" unchecked for a company?** If its career site embeds Greenhouse (`?gh_jid=` in the URL), add `domain: board-name` under `jd.greenhouse_boards`.
 - **Too many or too few pushes:** adjust `tiers.notify_threshold`.

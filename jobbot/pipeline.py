@@ -14,7 +14,7 @@ from .config import Settings
 from .jd_fetch import USER_AGENT, JDFetcher
 from .llm.gemini import GeminiScorer, InvalidResponse, LLMConfigError, QuotaExhausted
 from .llm.prompt import build_user_prompt
-from .models import FitAnalysis, JobDescription, Listing
+from .models import FitAnalysis, JobDescription, Listing, normalize_text
 from .notify import Notifier, digest_payload, match_payload
 from .notion import NotionClient, NotionError, sync_listing
 from .prefilter import Prescorer, TitleClassifier
@@ -172,15 +172,25 @@ class Run:
         log.info("Fetching %d job descriptions for pre-scoring", len(todo))
         self.jds.update(fetcher.fetch_many(todo))
         prescorer = self.deps.prescorer(self.settings)
-        floor = self.cfg.prefilter.min_score
+        cfg = self.cfg.prefilter
+        by_content = {self._content_key(ls): ls for ls in self.state.listings.values() if ls.jd_hash and ls.prescore is not None}
         for ls in todo:
             jd = self.jds.get(ls.id)
             self._record_jd(ls, jd)
+            if jd is not None:
+                original = by_content.setdefault(self._content_key(ls), ls)
+                if original is not ls:
+                    # Same company, title and description (typically one posting per office): score and track it once.
+                    ls.status, ls.filter_reason = "duplicate", f"duplicate of {original.id}"
+                    merged = dict.fromkeys(original.other_locations + ls.locations)
+                    original.other_locations = [loc for loc in merged if loc not in original.locations]
+                    continue
             ls.prescore = prescorer.score(ls.title, jd.text if jd else "", ls.role_weight or 0.5)
             self.report.prescored += 1
-            # Without a description the pre-score only sees the title, so leave the call to the LLM.
-            if jd is not None and ls.prescore < floor:
-                ls.status, ls.filter_reason = "filtered", f"pre-score {ls.prescore} below {floor}"
+            # Core-role titles always reach the LLM (the pre-score only orders them), and so do listings
+            # without a description, whose pre-score only saw the title.
+            if jd is not None and ls.prescore < cfg.min_score and ls.role_group not in cfg.always_score_groups:
+                ls.status, ls.filter_reason = "filtered", f"pre-score {ls.prescore} below {cfg.min_score}"
 
     def score(self, fetcher: JDFetcher) -> None:
         llm = self.cfg.llm
@@ -207,7 +217,7 @@ class Run:
         for ls in queue:
             if calls >= budget:
                 break
-            jd = self.jds[ls.id] if ls.id in self.jds else fetcher.fetch(ls)
+            jd = self.jds.get(ls.id) or fetcher.fetch(ls)  # also retries descriptions that failed earlier
             if ls.recheck and (jd is None or jd.hash == ls.jd_hash):
                 ls.recheck = False  # posting metadata changed but the description didn't
                 continue
@@ -293,6 +303,10 @@ class Run:
             self.report.errors.append(f"ntfy publish failed: {e}")
 
     # --- helpers ----------------------------------------------------------------------------------
+
+    @staticmethod
+    def _content_key(ls: ListingState) -> str:
+        return f"{normalize_text(ls.company)}|{normalize_text(ls.title)}|{ls.jd_hash}"
 
     def _record_jd(self, ls: ListingState, jd: JobDescription | None) -> None:
         ls.has_jd = jd is not None

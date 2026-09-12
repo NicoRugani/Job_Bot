@@ -5,7 +5,7 @@ import httpx
 import pytest
 
 from jobbot.config import JDConfig
-from jobbot.jd_fetch import JDFetcher, greenhouse_board_guesses, html_to_text
+from jobbot.jd_fetch import JDFetcher, greenhouse_board_guesses, html_to_text, looks_like_job_description
 from jobbot.models import Listing
 from jobbot.state import ListingState
 
@@ -36,6 +36,16 @@ def test_html_to_text_keeps_structure_and_drops_eeo():
     assert text == "About the role\n- Build UIs\n- Ship & test"
 
 
+def test_html_to_text_handles_double_escaped_entities():
+    assert html_to_text("<p>Date Posted:&amp;#xa;2026-09-09</p>") == "Date Posted:\n2026-09-09"
+
+
+def test_javascript_wall_is_not_a_description():
+    wall = "Please enable Javascript in your browser for best experience. " + "Apple will not discriminate against applicants. " * 10
+    assert not looks_like_job_description(wall, 300)
+    assert looks_like_job_description(BODY, 300)
+
+
 def test_greenhouse_direct_url():
     seen = []
     f = fetcher({"https://boards-api.greenhouse.io/v1/boards/klaviyo/jobs/123": httpx.Response(200, json={
@@ -50,6 +60,12 @@ def test_greenhouse_gh_jid_guesses_board():
     f = fetcher({"https://boards-api.greenhouse.io/v1/boards/optiverus/jobs/86": httpx.Response(200, json={"content": BODY})})
     assert f.fetch(listing("https://www.optiver.com/join-us/jobs/86/?gh_jid=86", company="Optiver")).source == "greenhouse"
     assert greenhouse_board_guesses("https://app.careerpuck.com/job-board/domino-data-lab/job/7?gh_jid=7", "Domino Data Lab")[0] == "dominodatalab"
+
+
+def test_greenhouse_known_board_mapping():
+    f = fetcher({"https://boards-api.greenhouse.io/v1/boards/flyzipline/jobs/789": httpx.Response(200, json={"content": BODY})},
+                greenhouse_boards={"zipline.com": "flyzipline"})
+    assert f.fetch(listing("https://www.zipline.com/open-roles?gh_jid=789", company="Zipline")).source == "greenhouse"
 
 
 @pytest.mark.parametrize(

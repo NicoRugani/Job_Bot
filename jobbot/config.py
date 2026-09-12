@@ -44,7 +44,8 @@ class Roles(BaseModel):
 
 
 class PrefilterConfig(BaseModel):
-    min_score: float = 20
+    min_score: float = 25
+    always_score_groups: list[str] = ["swe", "ux"]
     keyword_weight: float = 0.45
     embedding_weight: float = 0.55
     keyword_saturation: int = 6
@@ -58,7 +59,9 @@ class JDConfig(BaseModel):
     min_chars: int = 300
     max_chars: int = 30000
     concurrency: int = 8
+    per_host_concurrency: int = 3
     timeout_seconds: float = 20
+    greenhouse_boards: dict[str, str] = {}
 
 
 class LLMConfig(BaseModel):
