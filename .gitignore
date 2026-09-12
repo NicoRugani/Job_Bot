@@ -7,3 +7,4 @@ __pycache__/
 # Resume stays local; only the PII-free profile.yaml is committed.
 profile/*.pdf
 data/*.tmp
+larp-alert/
