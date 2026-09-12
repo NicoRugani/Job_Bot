@@ -1,7 +1,25 @@
 from argparse import Namespace
 
-from jobbot.__main__ import cmd_rescore
+import pytest
+
+from jobbot.__main__ import cmd_rescore, cmd_run
 from jobbot.state import State
+
+
+def test_run_stops_before_any_work_when_secrets_are_missing(settings, monkeypatch, capsys):
+    settings.secrets.gemini_api_key = None
+    settings.secrets.ntfy_topic = None
+    monkeypatch.setattr("jobbot.__main__.run", lambda *args, **kwargs: pytest.fail("pipeline should not start"))
+    assert cmd_run(settings, Namespace(dry_run=False, limit=None, no_notify=False)) == 2
+    error = capsys.readouterr().err
+    assert "GEMINI_API_KEY" in error and "NTFY_TOPIC" in error and "NOTION_TOKEN" not in error
+
+
+def test_dry_run_only_needs_gemini(settings, monkeypatch):
+    settings.secrets.notion_token = settings.secrets.ntfy_topic = None
+    monkeypatch.setattr("jobbot.__main__.run", lambda *args, **kwargs: pytest.fail("reached pipeline"))
+    with pytest.raises(pytest.fail.Exception, match="reached pipeline"):
+        cmd_run(settings, Namespace(dry_run=True, limit=None, no_notify=False))
 
 
 def test_rescore_unknown_id_writes_nothing(settings):

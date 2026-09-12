@@ -32,7 +32,24 @@ def print_table(rows: list[ListingState]) -> None:
         )
 
 
+def missing_secrets(settings: Settings, dry_run: bool) -> list[str]:
+    secrets, cfg = settings.secrets, settings.config
+    needed = {"GEMINI_API_KEY": secrets.gemini_api_key}
+    if not dry_run and cfg.notion.enabled:
+        needed |= {"NOTION_TOKEN": secrets.notion_token, "NOTION_DATA_SOURCE_ID": secrets.notion_data_source_id}
+    if not dry_run and cfg.notify.enabled:
+        needed["NTFY_TOPIC"] = secrets.ntfy_topic
+    return [name for name, value in needed.items() if not value]
+
+
 def cmd_run(settings: Settings, args: argparse.Namespace) -> int:
+    if missing := missing_secrets(settings, args.dry_run):
+        print(
+            f"ERROR: missing {', '.join(missing)}. On GitHub add them under Settings > Secrets and variables > "
+            "Actions > Repository secrets (exact names); locally put them in .env.",
+            file=sys.stderr,
+        )
+        return 2
     report = run(settings, RunOptions(dry_run=args.dry_run, llm_limit=args.limit, notify=not args.no_notify))
     paused = " (Gemini quota used up or overloaded; will retry next run)" if report.quota_paused else ""
     print(
