@@ -1,0 +1,59 @@
+name: jobbot
+
+on:
+  schedule:
+    - cron: "17 */4 * * *" # every 4 hours (UTC)
+  workflow_dispatch:
+    inputs:
+      limit:
+        description: "Max LLM calls for this run (blank = config default)"
+        required: false
+
+concurrency:
+  group: jobbot
+  cancel-in-progress: false
+
+permissions:
+  contents: write
+
+jobs:
+  run:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Cache embedding model
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/fastembed
+          key: fastembed-bge-small-en-v1.5
+
+      - name: Run bot
+        env:
+          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+          NOTION_TOKEN: ${{ secrets.NOTION_TOKEN }}
+          NOTION_DATA_SOURCE_ID: ${{ secrets.NOTION_DATA_SOURCE_ID }}
+          NTFY_TOPIC: ${{ secrets.NTFY_TOPIC }}
+          LIMIT: ${{ inputs.limit }}
+        run: python -m jobbot run ${LIMIT:+--limit "$LIMIT"}
+
+      # Runs even if the bot reported errors, so progress (scores, Notion page ids, sent notifications) is kept.
+      - name: Commit state
+        if: always()
+        run: |
+          git config user.name "jobbot"
+          git config user.email "jobbot@users.noreply.github.com"
+          git add data/state.json 2>/dev/null || exit 0
+          git diff --cached --quiet && exit 0
+          git commit -m "Update job bot state"
+          git pull --rebase
+          git push
