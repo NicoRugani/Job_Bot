@@ -1,0 +1,10 @@
+[project]
+name = "jobbot"
+version = "0.1.0"
+description = "Finds Summer 2027 internships, scores fit, tracks them in Notion and pushes strong matches via ntfy."
+requires-python = ">=3.12"
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["."]
+filterwarnings = ["ignore::DeprecationWarning"]
