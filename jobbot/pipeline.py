@@ -12,7 +12,7 @@ import httpx
 
 from .config import Settings
 from .jd_fetch import USER_AGENT, JDFetcher
-from .llm.gemini import GeminiScorer, InvalidResponse, LLMConfigError, QuotaExhausted
+from .llm.gemini import GeminiScorer, InvalidResponse, LLMConfigError, ScoringPaused
 from .llm.prompt import build_user_prompt
 from .models import FitAnalysis, JobDescription, Listing, normalize_text
 from .notify import Notifier, digest_payload, match_payload
@@ -223,9 +223,9 @@ class Run:
                 continue
             try:
                 analysis = scorer.analyze(build_user_prompt(profile_block, self.cfg.term, ls, jd))
-            except QuotaExhausted as e:
+            except ScoringPaused as e:
                 self.report.quota_paused = True
-                log.warning("Gemini quota exhausted; remaining listings stay pending until a later run (%s)", e)
+                log.warning("Gemini paused (%s); remaining listings stay pending until a later run", e)
                 break
             except LLMConfigError as e:
                 self.report.errors.append(str(e))

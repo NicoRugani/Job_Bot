@@ -34,7 +34,7 @@ def print_table(rows: list[ListingState]) -> None:
 
 def cmd_run(settings: Settings, args: argparse.Namespace) -> int:
     report = run(settings, RunOptions(dry_run=args.dry_run, llm_limit=args.limit, notify=not args.no_notify))
-    paused = " (Gemini quota used up; will retry next run)" if report.quota_paused else ""
+    paused = " (Gemini quota used up or overloaded; will retry next run)" if report.quota_paused else ""
     print(
         f"\nFetched {report.fetched} listings ({report.new} new, {report.closed} tracked closed). "
         f"Pre-scored {report.prescored}, LLM-scored {len(report.scored)}, {report.pending} pending{paused}."

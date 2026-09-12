@@ -4,7 +4,7 @@ from types import SimpleNamespace
 import pytest
 from google.genai import errors
 
-from jobbot.llm.gemini import GeminiScorer, InvalidResponse, LLMConfigError, QuotaExhausted
+from jobbot.llm.gemini import GeminiScorer, InvalidResponse, LLMConfigError, QuotaExhausted, ServiceUnavailable
 from jobbot.llm.prompt import build_user_prompt, response_schema
 
 
@@ -58,6 +58,14 @@ def test_repeated_rate_limits_eventually_pause():
     s = scorer([quota_error("PerMinute")] * 4)
     with pytest.raises(QuotaExhausted):
         s.analyze("prompt")
+
+
+def test_server_overload_pauses_instead_of_failing_the_listing():
+    overloaded = errors.ServerError(503, {"error": {"code": 503, "status": "UNAVAILABLE", "message": "high demand"}})
+    s = scorer([overloaded] * 4)
+    with pytest.raises(ServiceUnavailable):
+        s.analyze("prompt")
+    assert len(s.client.calls) == 4
 
 
 def test_garbage_output_is_invalid():

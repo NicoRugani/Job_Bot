@@ -1,7 +1,7 @@
 """Gemini (free tier) fit analysis with structured JSON output.
 
-No fallback provider: when the free quota is used up we raise QuotaExhausted and the pipeline
-leaves the remaining listings pending for a later run.
+No fallback provider: when the free quota is used up or Gemini is overloaded we raise ScoringPaused
+and the pipeline leaves the remaining listings pending for a later run.
 """
 
 from __future__ import annotations
@@ -23,8 +23,16 @@ from .prompt import SYSTEM_PROMPT, response_schema
 log = logging.getLogger(__name__)
 
 
-class QuotaExhausted(Exception):
-    """The free-tier quota is used up; stop scoring and retry on a later run."""
+class ScoringPaused(Exception):
+    """Gemini can't take requests right now; stop scoring and retry on a later run."""
+
+
+class QuotaExhausted(ScoringPaused):
+    """The free-tier quota is used up."""
+
+
+class ServiceUnavailable(ScoringPaused):
+    """Gemini keeps returning server errors (e.g. 503 high demand) even after retries."""
 
 
 class InvalidResponse(Exception):
@@ -73,6 +81,7 @@ class GeminiScorer:
             system_instruction=SYSTEM_PROMPT,
             response_mime_type="application/json",
             response_json_schema=response_schema(),
+            automatic_function_calling=types.AutomaticFunctionCallingConfig(disable=True),
         )
 
     def _pace(self) -> None:
@@ -98,7 +107,7 @@ class GeminiScorer:
                 continue
             except errors.ServerError as e:
                 if attempt == self.MAX_ATTEMPTS:
-                    raise InvalidResponse(f"Gemini server error: {e}") from e
+                    raise ServiceUnavailable(f"Gemini server error {e.code} {e.status}: {e.message}") from e
                 self.sleep(10.0 * attempt)
                 continue
             try:
