@@ -15,6 +15,15 @@ def test_run_stops_before_any_work_when_secrets_are_missing(settings, monkeypatc
     assert "GEMINI_API_KEY" in error and "NTFY_TOPIC" in error and "NOTION_TOKEN" not in error
 
 
+def test_paused_run_is_flagged_in_github_actions(settings, monkeypatch, capsys):
+    from jobbot.pipeline import RunReport
+
+    monkeypatch.setenv("GITHUB_ACTIONS", "true")
+    monkeypatch.setattr("jobbot.__main__.run", lambda *args, **kwargs: RunReport(pending=618, quota_paused=True, pause_reason="503 UNAVAILABLE"))
+    assert cmd_run(settings, Namespace(dry_run=False, limit=None, no_notify=False)) == 0
+    assert "::warning title=Gemini paused::Scored 0, 618 still pending. 503 UNAVAILABLE" in capsys.readouterr().out
+
+
 def test_dry_run_only_needs_gemini(settings, monkeypatch):
     settings.secrets.notion_token = settings.secrets.ntfy_topic = None
     monkeypatch.setattr("jobbot.__main__.run", lambda *args, **kwargs: pytest.fail("reached pipeline"))

@@ -61,6 +61,8 @@ def retry_delay_seconds(error: errors.APIError) -> float | None:
 
 class GeminiScorer:
     MAX_ATTEMPTS = 4
+    # "High demand" 503 spikes usually pass within a few minutes; wait them out before pausing the run.
+    OVERLOAD_BACKOFF = (15.0, 45.0, 90.0)
 
     def __init__(
         self,
@@ -108,7 +110,9 @@ class GeminiScorer:
             except errors.ServerError as e:
                 if attempt == self.MAX_ATTEMPTS:
                     raise ServiceUnavailable(f"Gemini server error {e.code} {e.status}: {e.message}") from e
-                self.sleep(10.0 * attempt)
+                delay = self.OVERLOAD_BACKOFF[attempt - 1]
+                log.info("Gemini returned %s (%s); retrying in %.0fs", e.code, e.status, delay)
+                self.sleep(delay)
                 continue
             try:
                 return FitAnalysis.model_validate_json(response.text or "")

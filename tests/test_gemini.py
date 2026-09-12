@@ -62,10 +62,17 @@ def test_repeated_rate_limits_eventually_pause():
 
 def test_server_overload_pauses_instead_of_failing_the_listing():
     overloaded = errors.ServerError(503, {"error": {"code": 503, "status": "UNAVAILABLE", "message": "high demand"}})
-    s = scorer([overloaded] * 4)
+    sleeps = []
+    s = scorer([overloaded] * 4, sleeps)
     with pytest.raises(ServiceUnavailable):
         s.analyze("prompt")
     assert len(s.client.calls) == 4
+    assert sleeps == [15.0, 45.0, 90.0]
+
+
+def test_brief_overload_recovers(make_analysis):
+    overloaded = errors.ServerError(503, {"error": {"code": 503, "status": "UNAVAILABLE", "message": "high demand"}})
+    assert scorer([overloaded, overloaded, make_analysis().model_dump_json()]).analyze("prompt").fit_score == 80
 
 
 def test_garbage_output_is_invalid():

@@ -51,6 +51,7 @@ class RunReport:
     scored: list[ListingState] = field(default_factory=list)
     pending: int = 0
     quota_paused: bool = False
+    pause_reason: str | None = None
     notion_writes: int = 0
     notified: int = 0
     errors: list[str] = field(default_factory=list)
@@ -225,6 +226,7 @@ class Run:
                 analysis = scorer.analyze(build_user_prompt(profile_block, self.cfg.term, ls, jd))
             except ScoringPaused as e:
                 self.report.quota_paused = True
+                self.report.pause_reason = " ".join(str(e).split())[:300]
                 log.warning("Gemini paused (%s); remaining listings stay pending until a later run", e)
                 break
             except LLMConfigError as e:

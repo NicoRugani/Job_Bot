@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 import logging
+import os
 import sys
 from collections import Counter
 
@@ -56,6 +57,10 @@ def cmd_run(settings: Settings, args: argparse.Namespace) -> int:
         f"\nFetched {report.fetched} listings ({report.new} new, {report.closed} tracked closed). "
         f"Pre-scored {report.prescored}, LLM-scored {len(report.scored)}, {report.pending} pending{paused}."
     )
+    if report.quota_paused:
+        print(f"Gemini paused: {report.pause_reason}")
+        if os.environ.get("GITHUB_ACTIONS"):  # shows as a yellow annotation on the run's summary page
+            print(f"::warning title=Gemini paused::Scored {len(report.scored)}, {report.pending} still pending. {report.pause_reason}")
     print_table(sorted(report.scored, key=lambda ls: -(ls.final_score or 0)))
     if args.dry_run:
         print("\n(dry run: state not saved, nothing written to Notion, no notifications)")
