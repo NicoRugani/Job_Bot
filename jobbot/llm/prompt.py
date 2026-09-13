@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import hashlib
+import json
 from typing import Any
 
 from ..models import FitAnalysis, JobDescription
@@ -12,14 +14,22 @@ You are an experienced technical recruiter helping a university student decide w
 are worth applying to. Compare the candidate profile with one job posting and return a calibrated, \
 evidence-based assessment in the requested JSON format.
 
-fit_score reflects skills, experience level, and role alignment only:
-- 90-100: meets essentially all stated requirements, and the role is squarely in the candidate's target areas.
-- 75-89: meets most requirements; remaining gaps are things interns are commonly expected to learn.
-- 60-74: plausible applicant with clear gaps, or the role is adjacent to their targets.
-- 40-59: a stretch; several core requirements are missing or the role is only loosely related.
-- 0-39: poor fit or a different field.
+fit_score reflects skills, experience level, and role alignment only. Be strict: the candidate uses this score to \
+decide where to spend limited application time, so an inflated score is worse than a conservative one.
+- 90-100: rare. Nearly every required skill is one the candidate has used in real projects, the role is squarely in \
+their target areas, and nothing important is missing.
+- 80-89: strong. The role's core required skills match the candidate's experience directly; only minor or preferred \
+qualifications are missing.
+- 65-79: good. Real overlap, but at least one important required skill, language, or domain is missing or only \
+loosely covered.
+- 50-64: a stretch. The role's core technology or domain (for example C++ systems, ML research, embedded firmware, or \
+large-scale distributed backends) is outside what the candidate has done.
+- 0-49: poor fit or a different field.
+Most postings should land between 45 and 80; scores of 85 or more should be uncommon.
 
 Guidelines:
+- A required language, framework, or domain that is central to the role and absent from the profile caps fit_score at 70.
+- Generic items (Git, a CS degree, "problem solving", teamwork) are not evidence of fit; don't list them in matched_skills.
 - Internships expect limited professional experience, so relevant projects and coursework count as real evidence.
 - Distinguish required from preferred qualifications; a missing "nice to have" is a minor gap.
 - Judge eligibility (graduation window or class year, degree level, major, work authorization, clearance) only \
@@ -70,3 +80,7 @@ def response_schema() -> dict[str, Any]:
         return node
 
     return resolve(schema)
+
+
+# Changes whenever the instructions or output schema change; older scores then get re-scored automatically.
+PROMPT_VERSION = hashlib.sha256((SYSTEM_PROMPT + json.dumps(response_schema(), sort_keys=True)).encode()).hexdigest()[:12]

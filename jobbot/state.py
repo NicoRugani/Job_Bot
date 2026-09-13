@@ -24,6 +24,7 @@ class ListingState(BaseModel):
     url: str
     locations: list[str] = []
     other_locations: list[str] = []  # from identical postings at other offices
+    area: str | None = None  # "⭐ St. Louis", "US", "Remote", ... (see location.py)
     category: str | None = None
     degrees: list[str] = []
     date_posted: datetime | None = None
@@ -48,6 +49,7 @@ class ListingState(BaseModel):
     tier: Tier | None = None
     scored_by: str | None = None
     scored_at: datetime | None = None
+    prompt_version: str | None = None  # which scoring instructions produced this score
 
     notion_page_id: str | None = None
     notion_url: str | None = None

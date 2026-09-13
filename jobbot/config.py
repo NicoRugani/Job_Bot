@@ -55,6 +55,17 @@ class PrefilterConfig(BaseModel):
     similarity_ceiling: float = 0.85
 
 
+class PreferredArea(BaseModel):
+    name: str
+    bonus: float = 8
+    patterns: list[str]
+
+
+class LocationConfig(BaseModel):
+    us_only: bool = True
+    preferred: list[PreferredArea] = []
+
+
 class JDConfig(BaseModel):
     min_chars: int = 300
     max_chars: int = 30000
@@ -89,9 +100,9 @@ class ScoringConfig(BaseModel):
 
 
 class Tiers(BaseModel):
-    notify_threshold: int = 80
-    good_threshold: int = 65
-    track_threshold: int = 50
+    notify_threshold: int = 82
+    good_threshold: int = 70
+    track_threshold: int = 55
 
 
 class NotifyConfig(BaseModel):
@@ -111,6 +122,7 @@ class Config(BaseModel):
     state_path: str = "data/state.json"
     sources: Sources = Sources()
     roles: Roles
+    location: LocationConfig = LocationConfig()
     prefilter: PrefilterConfig = PrefilterConfig()
     jd: JDConfig = JDConfig()
     llm: LLMConfig = LLMConfig()

@@ -16,6 +16,7 @@ from .state import ListingState
 
 API_URL = "https://api.notion.com/v1"
 NOTION_VERSION = "2025-09-03"
+VIEWS_API_VERSION = "2026-03-11"  # the /views endpoints need this newer version
 
 TIER_LABEL = {"strong": "🔥 Strong", "good": "✅ Good", "possible": "🤔 Possible"}
 ROLE_LABEL = {"swe": "SWE", "embedded": "Embedded/HW", "ux": "UX/UI", "other": "Other"}
@@ -36,6 +37,8 @@ DATABASE_PROPERTIES: dict[str, dict] = {
         ("New", "blue"), ("Interested", "purple"), ("Applied", "orange"), ("OA", "yellow"),
         ("Interview", "pink"), ("Offer", "green"), ("Rejected", "gray"), ("Pass", "brown"),
     ),
+    "Applied on": {"date": {}},
+    "Area": _select_schema(("⭐ St. Louis", "orange"), ("⭐ Bozeman", "orange"), ("US", "blue"), ("Remote", "green"), ("Unknown", "gray")),
     "Role type": _select_schema(("SWE", "blue"), ("UX/UI", "pink"), ("Embedded/HW", "orange"), ("Other", "gray")),
     "Work mode": _select_schema(("In person", "blue"), ("Hybrid", "purple"), ("Remote", "green"), ("Unknown", "gray")),
     "Paid": _select_schema(("Paid", "green"), ("Unpaid", "red"), ("Unknown", "gray")),
@@ -86,12 +89,15 @@ class NotionClient:
         self.clock = clock
         self._last: float | None = None
 
-    def request(self, method: str, path: str, body: dict | None = None) -> dict[str, Any]:
+    def request(
+        self, method: str, path: str, body: dict | None = None, *, params: dict | None = None, version: str = NOTION_VERSION
+    ) -> dict[str, Any]:
+        headers = {**self.headers, "Notion-Version": version}
         for attempt in range(5):
             if self._last is not None and (wait := self.min_interval - (self.clock() - self._last)) > 0:
                 self.sleep(wait)
             self._last = self.clock()
-            response = self.client.request(method, path, json=body, headers=self.headers)
+            response = self.client.request(method, path, json=body, params=params, headers=headers)
             if response.status_code == 429 or response.status_code >= 500:
                 self.sleep(float(response.headers.get("Retry-After", 2**attempt)))
                 continue
@@ -122,6 +128,41 @@ class NotionClient:
     def update_page(self, page_id: str, properties: dict) -> dict[str, Any]:
         return self.request("PATCH", f"/pages/{page_id}", {"properties": properties})
 
+    def retrieve_page(self, page_id: str) -> dict[str, Any]:
+        return self.request("GET", f"/pages/{page_id}")
+
+    def trash_page(self, page_id: str) -> dict[str, Any]:
+        return self.request("PATCH", f"/pages/{page_id}", {"in_trash": True})
+
+    def data_source(self, data_source_id: str) -> dict[str, Any]:
+        return self.request("GET", f"/data_sources/{data_source_id}")
+
+    def list_views(self, database_id: str) -> list[dict[str, Any]]:
+        """Full view objects (the list endpoint only returns ids)."""
+        views: list[dict[str, Any]] = []
+        cursor = None
+        while True:
+            params = {"database_id": database_id, "page_size": 100, **({"start_cursor": cursor} if cursor else {})}
+            data = self.request("GET", "/views", params=params, version=VIEWS_API_VERSION)
+            views += [self.request("GET", f"/views/{ref['id']}", version=VIEWS_API_VERSION) for ref in data.get("results", [])]
+            if not data.get("has_more"):
+                return views
+            cursor = data.get("next_cursor")
+
+    def create_view(self, body: dict[str, Any]) -> dict[str, Any]:
+        return self.request("POST", "/views", body, version=VIEWS_API_VERSION)
+
+    def update_view(self, view_id: str, body: dict[str, Any]) -> dict[str, Any]:
+        return self.request("PATCH", f"/views/{view_id}", body, version=VIEWS_API_VERSION)
+
+    def ensure_properties(self, data_source_id: str, properties: dict[str, dict]) -> list[str]:
+        """Add columns the database is missing (e.g. ones introduced after it was created). Returns their names."""
+        existing = self.data_source(data_source_id).get("properties", {})
+        missing = {name: config for name, config in properties.items() if name not in existing}
+        if missing:
+            self.request("PATCH", f"/data_sources/{data_source_id}", {"properties": missing})
+        return list(missing)
+
     def query_data_source(self, data_source_id: str) -> list[dict[str, Any]]:
         pages: list[dict[str, Any]] = []
         cursor = None
@@ -141,6 +182,82 @@ class ExistingPage:
     page_id: str
     url: str | None
     tier_label: str | None
+
+
+LIST_COLUMNS = ["Role", "Company", "Score", "Tier", "Area", "Status", "Work mode", "Pay", "Apply link", "Posted"]
+DEFAULT_VIEW_NAMES = {"Default view", "Table", "Untitled"}
+
+
+def view_specs(home_areas: list[str]) -> list[dict[str, Any]]:
+    """The views set up in the tracking database. Filters and sorts use the data source query shapes."""
+    still_open = {"property": "Closed", "checkbox": {"equals": False}}
+    by_score = [{"property": "Score", "direction": "descending"}]
+    specs: list[dict[str, Any]] = [
+        {"name": "To review", "type": "table", "sorts": by_score, "show": LIST_COLUMNS,
+         "filter": {"and": [{"property": "Status", "select": {"equals": "New"}}, still_open]}},
+        {"name": "Application board", "type": "board", "group_by": "Status", "sorts": by_score,
+         "show": ["Role", "Company", "Score", "Area", "Applied on"], "filter": still_open},
+        {"name": "Strong matches", "type": "table", "sorts": by_score, "show": LIST_COLUMNS,
+         "filter": {"and": [{"property": "Tier", "select": {"equals": TIER_LABEL["strong"]}}, still_open]}},
+    ]
+    if home_areas:
+        near = [{"property": "Area", "select": {"equals": area}} for area in home_areas]
+        specs.append({"name": "Near home", "type": "table", "sorts": by_score, "show": LIST_COLUMNS,
+                      "filter": {"and": [near[0] if len(near) == 1 else {"or": near}, still_open]}})
+    specs.append(
+        {"name": "Applied", "type": "table", "sorts": [{"property": "Applied on", "direction": "descending"}],
+         "show": ["Role", "Company", "Status", "Applied on", "Notes", "Apply link", "Score", "Area"],
+         "filter": {"or": [{"property": "Status", "select": {"equals": s}} for s in ("Applied", "OA", "Interview", "Offer")]}}
+    )
+    return specs
+
+
+ALL_MATCHES_VIEW: dict[str, Any] = {
+    "name": "All matches", "type": "table", "sorts": [{"property": "Score", "direction": "descending"}],
+    "show": LIST_COLUMNS + ["Relocation", "Location", "Why it fits", "Gaps / red flags", "Applied on", "Notes", "Found"],
+}
+
+
+def _view_body(spec: dict[str, Any], property_ids: dict[str, str]) -> dict[str, Any]:
+    shown = [name for name in spec["show"] if name in property_ids]
+    columns = [{"property_id": property_ids[name], "visible": True} for name in shown]
+    columns += [{"property_id": pid, "visible": False} for name, pid in property_ids.items() if name not in shown]
+    configuration: dict[str, Any] = {"type": spec["type"], "properties": columns}
+    if spec["type"] == "board":
+        configuration["group_by"] = {"type": "select", "property_id": property_ids[spec["group_by"]], "sort": {"type": "manual"}, "hide_empty_groups": False}
+    body: dict[str, Any] = {"name": spec["name"], "sorts": spec["sorts"], "configuration": configuration}
+    if spec.get("filter"):
+        body["filter"] = spec["filter"]
+    return body
+
+
+def setup_views(notion: NotionClient, data_source_id: str, home_areas: list[str]) -> list[str]:
+    """Create the tracking views that don't exist yet (matched by name) and tidy the untouched default view."""
+    source = notion.data_source(data_source_id)
+    database_id = (source.get("parent") or {}).get("database_id")
+    property_ids = {name: prop["id"] for name, prop in (source.get("properties") or {}).items()}
+    existing = notion.list_views(database_id)
+    names = {view.get("name") for view in existing}
+    changes = []
+    for spec in view_specs(home_areas):
+        if spec["name"] in names:
+            continue
+        notion.create_view({"database_id": database_id, "data_source_id": data_source_id, "type": spec["type"], **_view_body(spec, property_ids)})
+        changes.append(f"created view '{spec['name']}'")
+    default = next((v for v in existing if v.get("name") in DEFAULT_VIEW_NAMES and v.get("type") == "table"), None)
+    if default is not None and ALL_MATCHES_VIEW["name"] not in names:
+        notion.update_view(default["id"], _view_body(ALL_MATCHES_VIEW, property_ids))
+        changes.append(f"turned '{default.get('name')}' into '{ALL_MATCHES_VIEW['name']}'")
+    return changes
+
+
+def page_untouched(page: dict[str, Any]) -> bool:
+    """True if you haven't used the row yet: Status still New, no notes, no applied date."""
+    props = page.get("properties") or {}
+    status = ((props.get("Status") or {}).get("select") or {}).get("name")
+    notes = "".join(t.get("plain_text", "") for t in (props.get("Notes") or {}).get("rich_text", []))
+    applied = (props.get("Applied on") or {}).get("date")
+    return status in (None, "New") and not notes and not applied
 
 
 def existing_pages_by_listing(notion: NotionClient, data_source_id: str) -> dict[str, ExistingPage]:
@@ -178,6 +295,7 @@ def bot_properties(ls: ListingState) -> dict[str, Any]:
         "Pay": {"rich_text": _text(a.pay_text)},
         "Relocation": _select(a.relocation_assistance.capitalize()),
         "Location": {"rich_text": _text("; ".join(dict.fromkeys(ls.locations + ls.other_locations)))},
+        "Area": _select(ls.area),
         "Why it fits": {"rich_text": _text(a.summary)},
         "Gaps / red flags": {"rich_text": _text("; ".join(a.red_flags + a.gaps))},
         "Apply link": {"url": ls.url},

@@ -27,8 +27,8 @@ def is_ineligible(analysis: FitAnalysis) -> bool:
     return not analysis.matches_target_term or e.grad_window_ok == "no" or e.degree_ok == "no"
 
 
-def final_score(analysis: FitAnalysis, cfg: ScoringConfig) -> int:
-    score = cfg.fit_weight * analysis.fit_score + cfg.logistics_weight * logistics_score(analysis, cfg)
+def final_score(analysis: FitAnalysis, cfg: ScoringConfig, location_bonus: float = 0.0) -> int:
+    score = cfg.fit_weight * analysis.fit_score + cfg.logistics_weight * logistics_score(analysis, cfg) + location_bonus
     if is_ineligible(analysis):
         score = min(score, cfg.eligibility_cap)
     return max(0, min(100, round(score)))

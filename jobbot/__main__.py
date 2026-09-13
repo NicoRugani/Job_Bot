@@ -11,7 +11,8 @@ from collections import Counter
 from .config import Settings, load_settings
 from .models import Eligibility, FitAnalysis
 from .notify import Notifier, match_payload
-from .notion import NotionClient, page_id_from
+from .location import home_area_labels
+from .notion import DATABASE_PROPERTIES, NotionClient, page_id_from, setup_views
 from .pipeline import RunOptions, run
 from .state import ListingState, State, utcnow
 
@@ -104,10 +105,23 @@ def cmd_init_notion(settings: Settings, args: argparse.Namespace) -> int:
     if not settings.secrets.notion_token:
         print("Set NOTION_TOKEN in .env first (see README).", file=sys.stderr)
         return 2
-    database_id, data_source_id = NotionClient(settings.secrets.notion_token).create_database(
-        page_id_from(args.parent_page), args.title
-    )
+    notion = NotionClient(settings.secrets.notion_token)
+    database_id, data_source_id = notion.create_database(page_id_from(args.parent_page), args.title)
+    for change in setup_views(notion, data_source_id, home_area_labels(settings.config.location)):
+        print(f"- {change}")
     print(f"Created database {database_id}.\nAdd this to .env and your GitHub secrets:\n\nNOTION_DATA_SOURCE_ID={data_source_id}")
+    return 0
+
+
+def cmd_setup_notion(settings: Settings, args: argparse.Namespace) -> int:
+    secrets = settings.secrets
+    if not (secrets.notion_token and secrets.notion_data_source_id):
+        print("Set NOTION_TOKEN and NOTION_DATA_SOURCE_ID in .env first (see README).", file=sys.stderr)
+        return 2
+    notion = NotionClient(secrets.notion_token)
+    changes = [f"added column '{name}'" for name in notion.ensure_properties(secrets.notion_data_source_id, DATABASE_PROPERTIES)]
+    changes += setup_views(notion, secrets.notion_data_source_id, home_area_labels(settings.config.location))
+    print("\n".join(f"- {change}" for change in changes) if changes else "Notion database is already up to date.")
     return 0
 
 
@@ -167,6 +181,7 @@ def main(argv: list[str] | None = None) -> int:
     notion_parser.add_argument("--parent-page", required=True, help="URL or id of a page shared with your integration")
     notion_parser.add_argument("--title", default="Summer 2027 Internships")
 
+    sub.add_parser("setup-notion", help="add missing columns and the filter/board views to the Notion database")
     sub.add_parser("test-notify", help="send a sample push notification")
 
     args = parser.parse_args(argv)
@@ -179,6 +194,7 @@ def main(argv: list[str] | None = None) -> int:
         "show": cmd_show,
         "rescore": cmd_rescore,
         "init-notion": cmd_init_notion,
+        "setup-notion": cmd_setup_notion,
         "test-notify": cmd_test_notify,
     }
     return commands[args.command](load_settings(), args)

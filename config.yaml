@@ -89,6 +89,25 @@ roles:
     - '\bsupply chain\b'
     - '\boperations\b'
 
+# Where the job is. In-person and hybrid roles outside the US are dropped before scoring; remote roles are kept
+# unless they're restricted to another country ("Remote in Canada"). Preferred areas add bonus points to the final score.
+location:
+  us_only: true
+  preferred:
+    - name: St. Louis
+      bonus: 8
+      patterns:
+        - '\bst\.?\s+louis\b'
+        - '\bsaint\s+louis\b'
+        - '\bstl\b'
+        - '\b(clayton|chesterfield|creve coeur|maryland heights|st\.? charles|st\.? peters|o''fallon|earth city|kirkwood|des peres|town and country|brentwood|fenton|hazelwood|florissant|ballwin|webster groves|university city|wentzville),\s*mo\b'
+        - '\b(belleville|edwardsville|o''fallon|collinsville|scott air force base),\s*il\b'
+    - name: Bozeman
+      bonus: 8
+      patterns:
+        - '\bbozeman\b'
+        - '\b(belgrade|big sky),\s*mt\b'
+
 # Free pre-score (0-100): keyword overlap with your skills + local embedding similarity.
 # Orders the LLM queue. Listings below min_score skip the LLM, except titles in always_score_groups.
 prefilter:
@@ -134,10 +153,12 @@ scoring:
     remote_unpaid: 35
     onsite_unpaid: 20
 
+# Calibrated on Gemini 3.5 Flash-Lite with the strict rubric in jobbot/llm/prompt.py: clear fits land 82+,
+# roles missing a core skill (e.g. C++, Go, TypeScript) land around 68-76.
 tiers:
-  notify_threshold: 80         # push notification + Notion
-  good_threshold: 65           # Notion
-  track_threshold: 50          # Notion; below this is only kept in state
+  notify_threshold: 82         # push notification + Notion
+  good_threshold: 70           # Notion
+  track_threshold: 55          # Notion; below this is only kept in state
 
 notify:
   enabled: true

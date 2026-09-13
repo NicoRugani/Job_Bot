@@ -5,6 +5,7 @@ from __future__ import annotations
 import logging
 from collections.abc import Callable
 from dataclasses import dataclass, field
+from datetime import timedelta
 from pathlib import Path
 from typing import Protocol
 
@@ -13,10 +14,20 @@ import httpx
 from .config import Settings
 from .jd_fetch import USER_AGENT, JDFetcher
 from .llm.gemini import GeminiScorer, InvalidResponse, LLMConfigError, ScoringPaused
-from .llm.prompt import build_user_prompt
-from .models import FitAnalysis, JobDescription, Listing, normalize_text
+from .llm.prompt import PROMPT_VERSION, build_user_prompt
+from .location import LocationRules
+from .models import FitAnalysis, JobDescription, Listing, Tier, normalize_text
 from .notify import Notifier, digest_payload, match_payload
-from .notion import TIER_LABEL, ExistingPage, NotionClient, NotionError, existing_pages_by_listing, sync_listing
+from .notion import (
+    DATABASE_PROPERTIES,
+    TIER_LABEL,
+    ExistingPage,
+    NotionClient,
+    NotionError,
+    existing_pages_by_listing,
+    page_untouched,
+    sync_listing,
+)
 from .prefilter import Prescorer, TitleClassifier
 from .profile import profile_embedding_text, profile_keywords, profile_prompt_block
 from .scoring import final_score, tier_for
@@ -27,6 +38,7 @@ from .state import ListingState, State, utcnow
 log = logging.getLogger("jobbot")
 
 FASTEMBED_CACHE = Path.home() / ".cache" / "fastembed"
+LOCATION_REASON = "outside the US and not remote"
 
 
 class Scorer(Protocol):
@@ -106,11 +118,13 @@ class Run:
         self.now = utcnow()
         self.report = RunReport()
         self.jds: dict[str, JobDescription | None] = {}
+        self.locations = LocationRules(self.cfg.location)
 
     def execute(self) -> RunReport:
         headers = {"User-Agent": USER_AGENT}
         with httpx.Client(headers=headers, follow_redirects=True, timeout=self.cfg.jd.timeout_seconds) as client:
             self.ingest(self.deps.fetch_listings(self.settings, client))
+            self.apply_location_rules()
             fetcher = self.deps.jd_fetcher(self.settings, client)
             self.prescore(fetcher)
             self.score(fetcher)
@@ -166,6 +180,22 @@ class Run:
                 ls.active = False
                 self.report.closed += int(ls.tracked)
 
+    def apply_location_rules(self) -> None:
+        """US-only rule and home-area bonus. Re-checked every run, so config edits also apply to older listings."""
+        for ls in self.state.listings.values():
+            excluded_by_location = ls.status == "filtered" and ls.filter_reason == LOCATION_REASON
+            if not ls.active or not (ls.status in ("pending", "scored") or excluded_by_location):
+                continue
+            verdict = self.locations.evaluate(ls.locations + ls.other_locations)
+            ls.area = verdict.area
+            if not verdict.allowed:
+                ls.status, ls.filter_reason, ls.tier = "filtered", LOCATION_REASON, None
+                continue
+            if excluded_by_location:  # the rule was relaxed
+                ls.status, ls.filter_reason = ("scored" if ls.analysis else "pending"), None
+            if ls.status == "scored" and ls.analysis is not None:
+                ls.final_score, ls.tier = self._score(ls.analysis, verdict.bonus)
+
     def prescore(self, fetcher: JDFetcher) -> None:
         todo = [ls for ls in self.state.listings.values() if ls.active and ls.status == "pending" and ls.prescore is None]
         if not todo:
@@ -195,7 +225,9 @@ class Run:
 
     def score(self, fetcher: JDFetcher) -> None:
         llm = self.cfg.llm
-        queue = [ls for ls in self.state.listings.values() if ls.active and (ls.status == "pending" or ls.recheck)]
+        queue = [
+            ls for ls in self.state.listings.values() if ls.active and (ls.status == "pending" or ls.recheck or self._outdated(ls))
+        ]
         if not queue:
             return
         budget = llm.max_per_run
@@ -210,8 +242,7 @@ class Run:
             self.report.errors.append("GEMINI_API_KEY is not set; skipped LLM scoring")
             return
 
-        # New listings first, best pre-score first, newest first.
-        queue.sort(key=lambda ls: (ls.recheck, -(ls.prescore or 0), -(ls.date_posted.timestamp() if ls.date_posted else 0)))
+        queue.sort(key=self._queue_order)
         scorer = self.deps.scorer(self.settings)
         profile_block = profile_prompt_block(self.settings.profile)
         calls = 0
@@ -219,7 +250,10 @@ class Run:
             if calls >= budget:
                 break
             jd = self.jds.get(ls.id) or fetcher.fetch(ls)  # also retries descriptions that failed earlier
-            if ls.recheck and (jd is None or jd.hash == ls.jd_hash):
+            if self._outdated(ls):
+                if jd is None and ls.has_jd:
+                    continue  # description unavailable right now; keep the old score and retry next run
+            elif ls.recheck and (jd is None or jd.hash == ls.jd_hash):
                 ls.recheck = False  # posting metadata changed but the description didn't
                 continue
             try:
@@ -241,6 +275,8 @@ class Run:
                     ls.recheck = False
                     if ls.status == "pending":
                         ls.status, ls.filter_reason = "filtered", "LLM output unusable after retries"
+                    else:
+                        ls.prompt_version = PROMPT_VERSION  # keep the old score rather than retrying forever
                 continue
             calls += 1
             self.state.record_llm_call(self.now)
@@ -264,14 +300,19 @@ class Run:
             log.warning("Notion is enabled but NOTION_TOKEN / NOTION_DATA_SOURCE_ID are not set; skipping")
             return
         notion = self.deps.notion(self.settings)
-        if any(not ls.notion_page_id for ls in targets):
-            try:
+        try:
+            if added := notion.ensure_properties(secrets.notion_data_source_id, DATABASE_PROPERTIES):
+                log.info("Added Notion columns: %s", ", ".join(added))
+            if any(not ls.notion_page_id for ls in targets):
                 self._adopt_existing_rows(existing_pages_by_listing(notion, secrets.notion_data_source_id), targets)
-            except NotionError as e:
-                self.report.errors.append(f"Couldn't read existing Notion rows: {e}")
-                return  # creating pages blind could duplicate rows
+        except NotionError as e:
+            self.report.errors.append(f"Couldn't read or update the Notion database: {e}")
+            return  # creating pages blind could duplicate rows
         for ls in sorted(targets, key=lambda ls: -(ls.final_score or 0)):
             try:
+                if ls.status == "filtered":
+                    self.report.notion_writes += int(self._retire_row(notion, ls))
+                    continue
                 self.report.notion_writes += int(sync_listing(notion, secrets.notion_data_source_id, ls))
             except NotionError as e:
                 self.report.errors.append(f"Notion sync failed for {ls.id}: {e}")
@@ -331,12 +372,49 @@ class Run:
         ls.jd_source = jd.source if jd else None
         ls.jd_hash = jd.hash if jd else None
 
+    def _outdated(self, ls: ListingState) -> bool:
+        """Scored with earlier scoring instructions, so the score isn't comparable with new ones."""
+        return ls.status == "scored" and ls.analysis is not None and ls.prompt_version != PROMPT_VERSION
+
+    def _queue_order(self, ls: ListingState) -> tuple[int, float, float]:
+        """Postings first seen in the last day, then outdated scores (best first), then the backlog, then rechecks."""
+        if ls.status == "pending" and ls.first_seen >= self.now - timedelta(days=1):
+            bucket, rank = 0, ls.prescore
+        elif self._outdated(ls):
+            bucket, rank = 1, ls.final_score
+        elif ls.status == "pending":
+            bucket, rank = 2, ls.prescore
+        else:
+            bucket, rank = 3, ls.prescore
+        return bucket, -(rank or 0), -(ls.date_posted.timestamp() if ls.date_posted else 0)
+
+    def _score(self, analysis: FitAnalysis, location_bonus: float) -> tuple[int, Tier | None]:
+        score = final_score(analysis, self.cfg.scoring, location_bonus)
+        return score, tier_for(score, self.cfg.tiers)
+
+    def _retire_row(self, notion: NotionClient, ls: ListingState) -> bool:
+        """A tracked listing that's now excluded: trash its Notion row, unless you've started using that row."""
+        assert ls.notion_page_id is not None
+        try:
+            page = notion.retrieve_page(ls.notion_page_id)
+        except NotionError as e:
+            if e.status != 404:
+                raise
+            page = None  # already gone
+        if page is not None and not page.get("in_trash"):
+            if not page_untouched(page):
+                return False  # has a status, notes, or applied date: leave it for you
+            notion.trash_page(ls.notion_page_id)
+        ls.notion_page_id = ls.notion_url = ls.notion_hash = None
+        return page is not None
+
     def _apply(self, ls: ListingState, analysis: FitAnalysis, model: str) -> None:
+        verdict = self.locations.evaluate(ls.locations + ls.other_locations)
         ls.analysis = analysis
-        ls.final_score = final_score(analysis, self.cfg.scoring)
-        ls.tier = tier_for(ls.final_score, self.cfg.tiers)
+        ls.area = verdict.area
+        ls.final_score, ls.tier = self._score(analysis, verdict.bonus)
         ls.status, ls.filter_reason = "scored", None
-        ls.scored_by, ls.scored_at = model, self.now
+        ls.scored_by, ls.scored_at, ls.prompt_version = model, self.now, PROMPT_VERSION
         ls.recheck = False
         ls.llm_failures = 0
 

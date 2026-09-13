@@ -9,7 +9,7 @@ SimplifyJobs list (+ optional company watchlist)
   → free pre-score: skill keywords + local embeddings   (ranks the queue, drops obvious misses)
   → Gemini free-tier fit analysis                      (pauses when quota runs out, resumes next run)
   → final score = 85% fit + 15% logistics preference
-  → Notion (score ≥ 50)  +  ntfy push (score ≥ 80)
+  → Notion (score ≥ 55)  +  ntfy push (score ≥ 82)
 ```
 
 ## How scoring works
@@ -28,12 +28,16 @@ Gemini reads your `profile/profile.yaml` and the job description, then returns a
 
 Hybrid counts as in person, and unknown pay counts as paid ×0.95. If the posting clearly excludes you (wrong graduation window, PhD-only, not a Summer 2027 internship), the score is capped at 40.
 
+**Location:** in-person and hybrid roles outside the US are dropped before scoring. Remote roles stay, unless they're limited to another country ("Remote in Canada"). Jobs in the St. Louis or Bozeman areas get **+8 points** and a ⭐ in the Notion **Area** column. Edit `location` in `config.yaml` to change the areas or bonus.
+
 | Tier | Score | What happens |
 |---|---|---|
-| 🔥 Strong | ≥ 80 | Notion + push notification |
-| ✅ Good | 65–79 | Notion |
-| 🤔 Possible | 50–64 | Notion |
-| — | < 50 | Remembered in `data/state.json` only |
+| 🔥 Strong | ≥ 82 | Notion + push notification |
+| ✅ Good | 70–81 | Notion |
+| 🤔 Possible | 55–69 | Notion |
+| — | < 55 | Remembered in `data/state.json` only |
+
+The scoring instructions in `jobbot/llm/prompt.py` are deliberately strict: clear fits score 82+, and roles missing a core skill land around 68–76. If you edit those instructions, older scores get re-scored automatically, after postings from the last day and before the backlog, without re-sending notifications. Changing tier cutoffs or weights in `config.yaml` updates existing scores on the next run without any Gemini calls.
 
 All weights and thresholds live in `config.yaml`.
 
@@ -77,7 +81,18 @@ pytest -q
    ```
 4. Put the printed `NOTION_DATA_SOURCE_ID` in `.env`.
 
-Edit **Status** and **Notes** freely; the bot never overwrites them. If you delete a page, the bot won't recreate it.
+The database comes with these views:
+
+| View | What it shows |
+|---|---|
+| **All matches** | Everything, best score first |
+| **To review** | Status = New, still open |
+| **Application board** | Cards grouped by Status; drag a card to change its status |
+| **Strong matches** | 🔥 Strong tier, still open |
+| **Near home** | ⭐ St. Louis / ⭐ Bozeman |
+| **Applied** | Applied, OA, Interview or Offer, newest application first |
+
+Edit **Status**, **Applied on** and **Notes** freely; the bot never overwrites them. If you delete a page, the bot won't recreate it. If a tracked job later falls outside your rules (e.g. you tighten `location`), the bot removes its row, unless you've already set a status, a note or an applied date.
 
 ### 6. Try it locally
 ```bash
@@ -100,7 +115,8 @@ The first backfill of existing listings may take a few runs if the free Gemini q
 | `python -m jobbot run [--dry-run] [--limit N] [--no-notify]` | One full pass |
 | `python -m jobbot show [--all]` | Print tracked (or all scored) listings and filter stats |
 | `python -m jobbot rescore <id>… \| all` | Queue listings for another LLM pass (e.g. after editing your profile) |
-| `python -m jobbot init-notion --parent-page <url>` | Create the Notion tracking database |
+| `python -m jobbot init-notion --parent-page <url>` | Create the Notion tracking database, with its views |
+| `python -m jobbot setup-notion` | Add any missing columns and views to an existing database (safe to rerun) |
 | `python -m jobbot test-notify` | Send a sample push |
 
 ## Tuning

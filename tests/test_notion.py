@@ -3,7 +3,17 @@ import json
 import httpx
 import pytest
 
-from jobbot.notion import API_URL, NotionClient, NotionError, bot_properties, existing_pages_by_listing, page_id_from, sync_listing
+from jobbot.notion import (
+    API_URL,
+    NotionClient,
+    NotionError,
+    bot_properties,
+    existing_pages_by_listing,
+    page_id_from,
+    page_untouched,
+    setup_views,
+    sync_listing,
+)
 
 
 class FakeNotion:
@@ -86,6 +96,68 @@ def test_existing_rows_are_indexed_across_pages():
     index = existing_pages_by_listing(client, "ds-1")
     assert list(index) == ["simplify:1"] and index["simplify:1"].page_id == "p1" and index["simplify:1"].tier_label == "🔥 Strong"
     assert "start_cursor" not in bodies[0] and bodies[1]["start_cursor"] == "c2"
+
+
+def test_ensure_properties_adds_only_missing_columns():
+    requests = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        requests.append(request)
+        if request.method == "GET":
+            return httpx.Response(200, json={"properties": {"Role": {}, "Status": {}}})
+        return httpx.Response(200, json={})
+
+    client = NotionClient("secret", client=httpx.Client(base_url=API_URL, transport=httpx.MockTransport(handler)), sleep=lambda s: None)
+    added = client.ensure_properties("ds-1", {"Role": {"title": {}}, "Status": {"select": {}}, "Area": {"select": {}}})
+    assert added == ["Area"]
+    assert requests[1].method == "PATCH" and json.loads(requests[1].content) == {"properties": {"Area": {"select": {}}}}
+
+
+def test_setup_views_creates_missing_views_with_column_ids():
+    source = {"parent": {"type": "database_id", "database_id": "db-1"}, "properties": {
+        "Role": {"id": "title", "type": "title"}, "Company": {"id": "c1", "type": "rich_text"}, "Score": {"id": "s1", "type": "number"},
+        "Tier": {"id": "t1", "type": "select"}, "Status": {"id": "st", "type": "select"}, "Closed": {"id": "cl", "type": "checkbox"},
+        "Area": {"id": "ar", "type": "select"}, "Applied on": {"id": "ap", "type": "date"}, "Listing ID": {"id": "li", "type": "rich_text"}}}
+    views = {"v0": {"id": "v0", "name": "Default view", "type": "table"}, "v1": {"id": "v1", "name": "Strong matches", "type": "table"}}
+    calls = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        calls.append(request)
+        path = request.url.path
+        if path.endswith("/data_sources/ds-1"):
+            return httpx.Response(200, json=source)
+        if path.endswith("/views") and request.method == "GET":
+            return httpx.Response(200, json={"results": [{"id": "v0"}, {"id": "v1"}], "has_more": False})
+        if request.method == "GET":
+            return httpx.Response(200, json=views[path.rsplit("/", 1)[-1]])
+        return httpx.Response(200, json={"id": "new"})
+
+    client = NotionClient("secret", client=httpx.Client(base_url=API_URL, transport=httpx.MockTransport(handler)), sleep=lambda s: None)
+    changes = setup_views(client, "ds-1", ["⭐ St. Louis", "⭐ Bozeman"])
+
+    created = [json.loads(r.content) for r in calls if r.method == "POST"]
+    assert [body["name"] for body in created] == ["To review", "Application board", "Near home", "Applied"]
+    assert all(body["database_id"] == "db-1" and body["data_source_id"] == "ds-1" for body in created)
+    board = created[1]
+    assert board["type"] == "board" and board["configuration"]["group_by"]["property_id"] == "st"
+    review = created[0]
+    assert review["configuration"]["properties"][0] == {"property_id": "title", "visible": True}
+    assert {"property_id": "li", "visible": False} in review["configuration"]["properties"]
+    near = created[2]
+    assert near["filter"]["and"][0] == {"or": [{"property": "Area", "select": {"equals": "⭐ St. Louis"}},
+                                               {"property": "Area", "select": {"equals": "⭐ Bozeman"}}]}
+    patch = next(r for r in calls if r.method == "PATCH")
+    assert patch.url.path.endswith("/views/v0") and json.loads(patch.content)["name"] == "All matches"
+    assert all(r.headers["Notion-Version"] == "2026-03-11" for r in calls if "/views" in r.url.path)
+    assert len(changes) == 5
+
+
+def test_page_untouched():
+    fresh = {"Status": {"select": {"name": "New"}}, "Notes": {"rich_text": []}, "Applied on": {"date": None}}
+    assert page_untouched({"properties": fresh})
+    assert not page_untouched({"properties": {**fresh, "Status": {"select": {"name": "Applied"}}}})
+    assert not page_untouched({"properties": {**fresh, "Notes": {"rich_text": [{"plain_text": "emailed recruiter"}]}}})
+    assert not page_untouched({"properties": {**fresh, "Applied on": {"date": {"start": "2026-09-14"}}}})
 
 
 def test_page_id_from_url():

@@ -1,7 +1,9 @@
+from datetime import timedelta
+
 from jobbot.llm.gemini import QuotaExhausted
 from jobbot.models import JobDescription
 from jobbot.pipeline import Deps, RunOptions, run
-from jobbot.state import State
+from jobbot.state import ListingState, State
 
 JD_TEXT = "Responsibilities: build React front-end features. Qualifications: JavaScript experience. " * 5
 
@@ -41,12 +43,23 @@ class FakeScorer:
 
 
 class FakeNotion:
-    def __init__(self, existing=()):
-        self.created, self.updated = [], []
+    def __init__(self, existing=(), page_status="New"):
+        self.created, self.updated, self.trashed = [], [], []
         self.existing = list(existing)
+        self.page_status = page_status
+
+    def ensure_properties(self, data_source_id, properties):
+        return []
 
     def query_data_source(self, data_source_id):
         return self.existing
+
+    def retrieve_page(self, page_id):
+        return {"id": page_id, "properties": {"Status": {"select": {"name": self.page_status}}, "Notes": {"rich_text": []}}}
+
+    def trash_page(self, page_id):
+        self.trashed.append(page_id)
+        return {}
 
     def create_page(self, data_source_id, properties, children):
         self.created.append(properties)
@@ -203,6 +216,93 @@ def test_adopted_row_that_becomes_strong_still_notifies(settings, make_listing, 
     deps, _, notifier = make_deps([make_listing(1)], FakeScorer([make_analysis(fit_score=95, relocation_assistance="yes")]), notion=notion)
     run(settings, RunOptions(), deps)
     assert not notion.created and len(notifier.sent) == 1
+
+
+def test_jobs_outside_the_us_are_dropped_before_scoring(settings, make_listing, make_analysis):
+    listings = [make_listing(1, locations=["Toronto, ON, Canada"]), make_listing(2, locations=["Remote in USA"])]
+    scorer = FakeScorer([make_analysis(fit_score=70)])
+    deps, _, _ = make_deps(listings, scorer)
+    run(settings, RunOptions(), deps)
+    state = State.load(settings.state_path)
+    assert state.listings["simplify:1"].status == "filtered" and "outside the US" in state.listings["simplify:1"].filter_reason
+    assert state.listings["simplify:2"].status == "scored" and state.listings["simplify:2"].area == "Remote"
+    assert len(scorer.prompts) == 1
+
+
+def test_home_areas_get_bonus_points(settings, make_listing, make_analysis):
+    listings = [make_listing(1, locations=["St. Louis, MO"]), make_listing(2, locations=["Seattle, WA"])]
+    deps, _, _ = make_deps(listings, FakeScorer([make_analysis(fit_score=76), make_analysis(fit_score=76)]))
+    run(settings, RunOptions(), deps)
+    state = State.load(settings.state_path)
+    stl, seattle = state.listings["simplify:1"], state.listings["simplify:2"]
+    assert (stl.area, seattle.area) == ("⭐ St. Louis", "US")
+    assert stl.final_score == seattle.final_score + 8
+    assert (stl.tier, seattle.tier) == ("strong", "good")
+
+
+def test_stricter_rule_retires_untouched_notion_rows(settings, make_listing, make_analysis):
+    settings.config.location.us_only = False
+    listing = make_listing(1, locations=["London, UK"])
+    deps, notion, _ = make_deps([listing], FakeScorer([make_analysis(fit_score=90)]))
+    run(settings, RunOptions(), deps)
+    assert len(notion.created) == 1
+
+    settings.config.location.us_only = True
+    deps, notion, _ = make_deps([listing], FakeScorer([]))
+    run(settings, RunOptions(), deps)
+    ls = State.load(settings.state_path).listings["simplify:1"]
+    assert notion.trashed == ["page-1"] and ls.status == "filtered" and ls.notion_page_id is None
+
+
+def test_rows_you_have_started_using_are_kept(settings, make_listing, make_analysis):
+    settings.config.location.us_only = False
+    listing = make_listing(1, locations=["London, UK"])
+    deps, _, _ = make_deps([listing], FakeScorer([make_analysis(fit_score=90)]))
+    run(settings, RunOptions(), deps)
+
+    settings.config.location.us_only = True
+    deps, notion, _ = make_deps([listing], FakeScorer([]), notion=FakeNotion(page_status="Applied"))
+    run(settings, RunOptions(), deps)
+    assert not notion.trashed
+    assert State.load(settings.state_path).listings["simplify:1"].notion_page_id == "page-1"
+
+
+def test_new_scoring_instructions_rescore_old_results_without_renotifying(settings, make_listing, make_analysis, monkeypatch):
+    deps, _, _ = make_deps([make_listing(1)], FakeScorer([make_analysis(fit_score=95, relocation_assistance="yes")]))
+    run(settings, RunOptions(), deps)
+
+    monkeypatch.setattr("jobbot.pipeline.PROMPT_VERSION", "v-next")
+    scorer = FakeScorer([make_analysis(fit_score=60)])
+    deps, notion, notifier = make_deps([make_listing(1)], scorer)
+    run(settings, RunOptions(), deps)
+    ls = State.load(settings.state_path).listings["simplify:1"]
+    assert len(scorer.prompts) == 1 and ls.prompt_version == "v-next" and ls.analysis.fit_score == 60
+    assert ls.tier == "possible" and notion.updated and not notifier.sent
+
+
+def test_outdated_score_waits_when_description_is_unavailable(settings, make_listing, make_analysis, monkeypatch):
+    deps, _, _ = make_deps([make_listing(1)], FakeScorer([make_analysis(fit_score=80)]))
+    run(settings, RunOptions(), deps)
+
+    monkeypatch.setattr("jobbot.pipeline.PROMPT_VERSION", "v-next")
+    scorer = FakeScorer([])
+    deps, _, _ = make_deps([make_listing(1)], scorer, fetcher=FakeFetcher(missing={"simplify:1"}))
+    run(settings, RunOptions(), deps)
+    ls = State.load(settings.state_path).listings["simplify:1"]
+    assert not scorer.prompts and ls.prompt_version != "v-next" and ls.analysis.fit_score == 80
+
+
+def test_queue_order(settings, make_listing, make_state):
+    from jobbot.pipeline import Run
+
+    deps, _, _ = make_deps([], FakeScorer([]))
+    current_run = Run(settings, RunOptions(), deps)
+    fresh = ListingState.from_listing(make_listing(1), current_run.now)
+    fresh.prescore = 10
+    backlog = ListingState.from_listing(make_listing(2), current_run.now - timedelta(days=3))
+    backlog.prescore = 95
+    outdated = make_state(3, score=85, prompt_version="old")
+    assert [ls.id for ls in sorted([backlog, outdated, fresh], key=current_run._queue_order)] == ["simplify:1", "simplify:3", "simplify:2"]
 
 
 def test_llm_limit_caps_calls(settings, make_listing, make_analysis):

@@ -36,7 +36,9 @@ def test_eligibility_problems_cap_the_score(config, make_analysis):
 
 
 def test_tiers(config):
-    assert tier_for(80, config.tiers) == "strong"
-    assert tier_for(79, config.tiers) == "good"
-    assert tier_for(50, config.tiers) == "possible"
-    assert tier_for(49, config.tiers) is None
+    assert tier_for(82, config.tiers) == "strong"
+    assert tier_for(81, config.tiers) == "good"
+    assert tier_for(70, config.tiers) == "good"
+    assert tier_for(69, config.tiers) == "possible"
+    assert tier_for(55, config.tiers) == "possible"
+    assert tier_for(54, config.tiers) is None
