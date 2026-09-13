@@ -50,6 +50,16 @@ class Listing(BaseModel):
 _UUID = r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}"
 
 
+def job_key(url: str) -> str | None:
+    """The same posting's identity across lists and sites: the employer's job id. Long ids (Greenhouse numbers,
+    Lever/Ashby UUIDs) are global; short ones are only unique per site. None when the URL has no id."""
+    ids = re.findall(rf"{_UUID}|\d{{5,}}", url, re.IGNORECASE)
+    if not ids:
+        return None
+    ident = ids[-1].lower()
+    return ident if len(ident) >= 7 else f"{urlsplit(url).netloc.lower()}|{ident}"
+
+
 def posting_identifier(url: str) -> str:
     """The ATS job id embedded in a URL, so the same posting matches across URL formats
     (e.g. job-boards.greenhouse.io/x/jobs/123 vs company.com/careers?gh_jid=123)."""

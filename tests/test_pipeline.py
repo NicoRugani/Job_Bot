@@ -4,7 +4,7 @@ import pytest
 
 from jobbot.llm.gemini import QuotaExhausted
 from jobbot.models import JobDescription
-from jobbot.pipeline import Deps, RunOptions, run
+from jobbot.pipeline import Deps, Feed, RunOptions, run
 from jobbot.state import ListingState, State
 
 JD_TEXT = "Responsibilities: build React front-end features. Qualifications: JavaScript experience. " * 5
@@ -83,7 +83,7 @@ class FakeNotifier:
 def make_deps(listings, scorer, fetcher=None, notion=None, notifier=None):
     notion, notifier = notion or FakeNotion(), notifier or FakeNotifier()
     deps = Deps(
-        fetch_listings=lambda s, c: listings,
+        fetch_listings=lambda s, c, known: Feed(list(listings), {listing.source for listing in listings}),
         jd_fetcher=lambda s, c: fetcher or FakeFetcher(),
         prescorer=lambda s: FakePrescorer(),
         scorer=lambda s: scorer,
@@ -348,6 +348,36 @@ def test_crash_after_scoring_still_saves_scores(settings, make_listing, make_ana
     with pytest.raises(RuntimeError):
         run(settings, RunOptions(), deps)
     assert State.load(settings.state_path).listings["simplify:1"].status == "scored"
+
+
+def test_same_posting_from_two_sources_is_tracked_once(settings, make_listing, make_analysis):
+    from_simplify = make_listing(1, company="Akuna Capital University", url="https://job-boards.greenhouse.io/akunacapital/jobs/8018893")
+    from_board = make_listing(2, source="greenhouse:akunacapital", company="Akuna Capital",
+                              url="https://www.akunacapital.com/careers/job/8018893/?gh_jid=8018893")
+    scorer = FakeScorer([make_analysis()])
+    deps, _, _ = make_deps([from_simplify, from_board], scorer)
+    run(settings, RunOptions(), deps)
+    assert State.load(settings.state_path).listings["simplify:2"].status == "duplicate"
+    assert len(scorer.prompts) == 1
+
+
+def test_rows_you_added_by_hand_are_reused_and_not_pushed(settings, make_listing, make_analysis):
+    manual = {"id": "page-manual", "url": "https://www.notion.so/manual", "properties": {
+        "Listing ID": {"rich_text": []}, "Company": {"rich_text": [{"plain_text": "Company 1"}]},
+        "Role": {"title": [{"plain_text": "Software Engineer Intern"}]}, "Tier": {"select": None}, "Status": {"select": {"name": "Applied"}}}}
+    notion = FakeNotion(existing=[manual])
+    deps, _, notifier = make_deps([make_listing(1)], FakeScorer([make_analysis(fit_score=95, relocation_assistance="yes")]), notion=notion)
+    run(settings, RunOptions(), deps)
+    ls = State.load(settings.state_path).listings["simplify:1"]
+    assert ls.notion_page_id == "page-manual" and not notion.created and not notifier.sent
+    assert notion.updated and notion.updated[0][0] == "page-manual"
+
+
+def test_no_readable_source_is_an_error(settings, make_analysis):
+    deps, _, _ = make_deps([], FakeScorer([]))
+    deps.fetch_listings = lambda s, c, known: Feed([], set(), ["Couldn't read simplify this run (500)"])
+    report = run(settings, RunOptions(), deps)
+    assert report.errors and report.warnings
 
 
 def test_llm_limit_caps_calls(settings, make_listing, make_analysis):

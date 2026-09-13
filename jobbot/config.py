@@ -26,8 +26,24 @@ class WatchlistSource(BaseModel):
     ashby: list[str] = []
 
 
+class FeedSource(BaseModel):
+    enabled: bool = True
+    url: str
+
+
+class CompanyBoardsSource(BaseModel):
+    enabled: bool = True
+    max_boards: int = 300
+    concurrency: int = 8
+
+
 class Sources(BaseModel):
     simplify: SimplifySource = SimplifySource()
+    zshah101: FeedSource = FeedSource(
+        url="https://raw.githubusercontent.com/zshah101/Automated-List-Of-Summer-2027-and-Fall-2026-Tech-Internships/main/data/internships.csv"
+    )
+    speedyapply: FeedSource = FeedSource(url="https://raw.githubusercontent.com/speedyapply/2027-SWE-College-Jobs/main/README.md")
+    company_boards: CompanyBoardsSource = CompanyBoardsSource()
     ats_watchlist: WatchlistSource = WatchlistSource()
 
 

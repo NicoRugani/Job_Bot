@@ -3,7 +3,8 @@
 Finds **Summer 2027** internships (SWE, UX/UI, embedded), scores how well each one fits your profile, tracks the good ones in **Notion**, and sends a **push notification** for strong matches. Runs for free on a GitHub Actions schedule.
 
 ```
-SimplifyJobs list (+ optional company watchlist)
+Simplify + zshah101 + speedyapply lists, plus the Greenhouse/Lever/Ashby boards of every company they mention
+  → the same posting found in several places is kept once (matched by the employer's job ID)
   → title filter (config.yaml › roles)
   → job description from the employer's ATS (Workday, Greenhouse, Oracle, Lever, Ashby, iCIMS, …)
   → free pre-score: skill keywords + local embeddings   (ranks the queue, drops obvious misses)
@@ -104,7 +105,7 @@ python -m jobbot show                       # tracked listings from saved state
 ### 7. Schedule it on GitHub Actions
 1. Push this folder to a **private** GitHub repo.
 2. Add the 4 values from `.env` as repository secrets: **Settings → Secrets and variables → Actions**, or with `gh secret set GEMINI_API_KEY` and so on.
-3. **Actions → jobbot → Run workflow** starts a run now. After that it runs every 4 hours and commits `data/state.json` back to the repo.
+3. **Actions → jobbot → Run workflow** starts a run now. After that it runs every 3 hours and commits `data/state.json` back to the repo.
 
 The first backfill of existing listings may take a few runs if the free Gemini quota runs out. Unscored listings stay pending and are retried, best matches first.
 

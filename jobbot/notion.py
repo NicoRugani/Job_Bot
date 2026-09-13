@@ -12,6 +12,7 @@ from typing import Any
 
 import httpx
 
+from .models import normalize_text
 from .state import ListingState
 
 API_URL = "https://api.notion.com/v1"
@@ -196,6 +197,11 @@ class ExistingPage:
     page_id: str
     url: str | None
     tier_label: str | None
+    status: str | None = None
+
+
+def row_name_key(company: str, role: str) -> str:
+    return f"name:{normalize_text(company)}|{normalize_text(role)}"
 
 
 LIST_COLUMNS = ["Role", "Company", "Score", "Tier", "Area", "Status", "Work mode", "Pay", "Apply link", "Posted"]
@@ -275,14 +281,24 @@ def page_untouched(page: dict[str, Any]) -> bool:
 
 
 def existing_pages_by_listing(notion: NotionClient, data_source_id: str) -> dict[str, ExistingPage]:
-    """Rows already in the database, keyed by their Listing ID property."""
+    """Rows already in the database, keyed by Listing ID; rows added by hand (no Listing ID) by company + role."""
     index: dict[str, ExistingPage] = {}
     for page in notion.query_data_source(data_source_id):
         props = page.get("properties") or {}
-        listing_id = "".join(t.get("plain_text", "") for t in (props.get("Listing ID") or {}).get("rich_text", []))
-        if listing_id:
-            tier = ((props.get("Tier") or {}).get("select") or {}).get("name")
-            index[listing_id] = ExistingPage(page["id"], page.get("url"), tier)
+
+        def plain(name: str, kind: str = "rich_text") -> str:
+            return "".join(t.get("plain_text", "") for t in (props.get(name) or {}).get(kind) or [])
+
+        row = ExistingPage(
+            page["id"],
+            page.get("url"),
+            ((props.get("Tier") or {}).get("select") or {}).get("name"),
+            ((props.get("Status") or {}).get("select") or {}).get("name"),
+        )
+        if listing_id := plain("Listing ID"):
+            index[listing_id] = row
+        elif (company := plain("Company")) and (role := plain("Role", "title")):
+            index.setdefault(row_name_key(company, role), row)
     return index
 
 

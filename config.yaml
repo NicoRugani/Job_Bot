@@ -5,11 +5,24 @@
 term: Summer 2027
 state_path: data/state.json
 
+# Read in this order. A posting found in several places is kept once (matched by the employer's job ID),
+# and a source that can't be read is skipped for that run with a warning.
 sources:
   simplify:
     enabled: true
     url: https://raw.githubusercontent.com/SimplifyJobs/Summer2027-Internships/dev/.github/scripts/listings.json
-  # Poll specific companies' boards directly to catch postings before the aggregator does.
+  zshah101:          # automated list that polls ~4,800 employer job boards every 30 minutes
+    enabled: true
+    url: https://raw.githubusercontent.com/zshah101/Automated-List-Of-Summer-2027-and-Fall-2026-Tech-Internships/main/data/internships.csv
+  speedyapply:       # curated US software internship table, updated daily
+    enabled: true
+    url: https://raw.githubusercontent.com/speedyapply/2027-SWE-College-Jobs/main/README.md
+  # Poll the Greenhouse/Lever/Ashby boards of every company seen in any list. Catches postings days before
+  # (or instead of) the lists.
+  company_boards:
+    enabled: true
+    max_boards: 300
+  # Extra boards to always poll, e.g. companies that haven't shown up in any list yet.
   ats_watchlist:
     enabled: false
     greenhouse: []   # board tokens from job-boards.greenhouse.io/<token>

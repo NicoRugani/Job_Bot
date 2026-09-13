@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import csv
 import logging
 from collections.abc import Callable
 from dataclasses import dataclass, field
@@ -16,7 +17,7 @@ from .jd_fetch import USER_AGENT, JDFetcher
 from .llm.gemini import GeminiScorer, InvalidResponse, LLMConfigError, ScoringPaused
 from .llm.prompt import PROMPT_VERSION, build_user_prompt
 from .location import LocationRules
-from .models import FitAnalysis, JobDescription, Listing, Tier, normalize_text
+from .models import FitAnalysis, JobDescription, Listing, Tier, job_key, normalize_text
 from .notify import Notifier, digest_payload, match_payload
 from .notion import (
     DATABASE_PROPERTIES,
@@ -26,13 +27,17 @@ from .notion import (
     NotionError,
     existing_pages_by_listing,
     page_untouched,
+    row_name_key,
     sync_listing,
 )
 from .prefilter import Prescorer, TitleClassifier
 from .profile import expected_graduation, profile_embedding_text, profile_keywords, profile_prompt_block
 from .scoring import final_score, tier_for
 from .sources.ats_watchlist import fetch_watchlist
+from .sources.company_boards import discover_boards, fetch_company_boards
 from .sources.simplify import fetch_simplify
+from .sources.speedyapply import fetch_speedyapply
+from .sources.zshah101 import fetch_zshah101
 from .state import ListingState, State, utcnow
 
 log = logging.getLogger("jobbot")
@@ -74,7 +79,7 @@ class RunReport:
 class Deps:
     """Factories for everything that touches the outside world (replaced with fakes in tests)."""
 
-    fetch_listings: Callable[[Settings, httpx.Client], list[Listing]]
+    fetch_listings: Callable[[Settings, httpx.Client, list[tuple[str, str]]], Feed]
     jd_fetcher: Callable[[Settings, httpx.Client], JDFetcher]
     prescorer: Callable[[Settings], Prescorer]
     scorer: Callable[[Settings], Scorer]
@@ -82,14 +87,40 @@ class Deps:
     notifier: Callable[[Settings], Notifier]
 
 
-def fetch_all_listings(settings: Settings, client: httpx.Client) -> list[Listing]:
-    cfg = settings.config
-    listings: list[Listing] = []
-    if cfg.sources.simplify.enabled:
-        listings += fetch_simplify(cfg.sources.simplify.url, cfg.term, client)
-    if cfg.sources.ats_watchlist.enabled:
-        listings += fetch_watchlist(cfg.sources.ats_watchlist, cfg.term, client)
-    return listings
+@dataclass
+class Feed:
+    listings: list[Listing] = field(default_factory=list)
+    sources: set[str] = field(default_factory=set)  # read successfully; their missing postings count as closed
+    warnings: list[str] = field(default_factory=list)
+
+
+def fetch_all_listings(settings: Settings, client: httpx.Client, known: list[tuple[str, str]]) -> Feed:
+    """Every enabled source, in order (earlier sources win duplicates). `known` is (url, company) of listings
+    seen in earlier runs, used to find more company job boards to poll."""
+    cfg, sources = settings.config, settings.config.sources
+    feed = Feed()
+
+    def read(name: str, fetch: Callable[[], list[Listing]]) -> None:
+        try:
+            feed.listings.extend(fetch())
+            feed.sources.add(name)
+        except (httpx.HTTPError, ValueError, KeyError, csv.Error) as e:
+            feed.warnings.append(f"Couldn't read {name} this run ({e})")
+
+    if sources.simplify.enabled:
+        read("simplify", lambda: fetch_simplify(sources.simplify.url, cfg.term, client))
+    if sources.zshah101.enabled:
+        read("zshah101", lambda: fetch_zshah101(sources.zshah101.url, cfg.term, client))
+    if sources.speedyapply.enabled:
+        read("speedyapply", lambda: fetch_speedyapply(sources.speedyapply.url, cfg.term, client))
+    if sources.company_boards.enabled:
+        boards = discover_boards([(listing.url, listing.company) for listing in feed.listings] + known)
+        found, checked = fetch_company_boards(boards[: sources.company_boards.max_boards], cfg.term, client, sources.company_boards.concurrency)
+        feed.listings.extend(found)
+        feed.sources |= checked
+    if sources.ats_watchlist.enabled:
+        feed.listings.extend(fetch_watchlist(sources.ats_watchlist, cfg.term, client))
+    return feed
 
 
 def default_deps() -> Deps:
@@ -126,7 +157,12 @@ class Run:
         headers = {"User-Agent": USER_AGENT}
         try:
             with httpx.Client(headers=headers, follow_redirects=True, timeout=self.cfg.jd.timeout_seconds) as client:
-                self.ingest(self.deps.fetch_listings(self.settings, client))
+                known = [(ls.url, ls.company) for ls in self.state.listings.values()]
+                feed = self.deps.fetch_listings(self.settings, client, known)
+                self.report.warnings += feed.warnings
+                if not feed.sources:
+                    self.report.errors.append("Couldn't read any job source this run")
+                self.ingest(feed)
                 self.apply_location_rules()
                 fetcher = self.deps.jd_fetcher(self.settings, client)
                 self.prescore(fetcher)
@@ -149,12 +185,15 @@ class Run:
 
     # --- stages -----------------------------------------------------------------------------------
 
-    def ingest(self, listings: list[Listing]) -> None:
+    def ingest(self, feed: Feed) -> None:
         classifier = TitleClassifier(self.cfg.roles)
         known = self.state.listings
-        seen_keys = {ls.dedupe_key: ls.id for ls in known.values() if ls.status != "duplicate"}
+        listings = feed.listings
+        originals = [ls for ls in known.values() if ls.status != "duplicate"]
+        seen_keys = {ls.dedupe_key: ls.id for ls in originals}
+        seen_jobs = {key: ls.id for ls in originals if (key := job_key(ls.url))}
         feed_ids = {listing.id for listing in listings}
-        feed_sources = {listing.source for listing in listings}
+        feed_sources = feed.sources | {listing.source for listing in listings}
         self.report.fetched = len(listings)
 
         for listing in listings:
@@ -167,10 +206,13 @@ class Run:
                 continue
             ls = ListingState.from_listing(listing, self.now)
             self.report.new += 1
-            if (original := seen_keys.get(listing.dedupe_key)) is not None:
+            key = job_key(listing.url)
+            if (original := seen_keys.get(listing.dedupe_key) or (seen_jobs.get(key) if key else None)) is not None:
                 ls.status, ls.filter_reason = "duplicate", f"duplicate of {original}"
             else:
                 seen_keys[listing.dedupe_key] = listing.id
+                if key:
+                    seen_jobs[key] = listing.id
                 verdict = classifier.classify(listing.title)
                 if not listing.active:
                     ls.status, ls.filter_reason = "filtered", "inactive when first seen"
@@ -369,14 +411,18 @@ class Run:
     # --- helpers ----------------------------------------------------------------------------------
 
     def _adopt_existing_rows(self, existing: dict[str, ExistingPage], targets: list[ListingState]) -> None:
-        """Reuse rows created by a run whose state never got saved, instead of creating duplicates."""
+        """Reuse rows that already exist (added by hand, or created by a run whose state never got saved)
+        instead of creating duplicates."""
         for ls in targets:
-            page = existing.get(ls.id)
-            if ls.notion_page_id or page is None:
+            if ls.notion_page_id:
+                continue
+            page = existing.get(ls.id) or existing.pop(row_name_key(ls.company, ls.title), None)
+            if page is None:
                 continue
             ls.notion_page_id, ls.notion_url = page.page_id, page.url
-            if page.tier_label == TIER_LABEL["strong"] and ls.tier == "strong" and ls.notified_at is None:
-                ls.notified_at = self.now  # it was pushed when that row was created
+            already_pushed = page.tier_label == TIER_LABEL["strong"] and ls.tier == "strong"
+            if ls.notified_at is None and (already_pushed or page.status not in (None, "New")):
+                ls.notified_at = self.now  # pushed when that row was created, or you're already handling it
 
     @staticmethod
     def _content_key(ls: ListingState) -> str:
