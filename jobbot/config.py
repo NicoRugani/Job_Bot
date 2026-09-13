@@ -65,9 +65,9 @@ class JDConfig(BaseModel):
 
 
 class LLMConfig(BaseModel):
-    model: str = "gemini-3.8-flash"
-    rpm: int = 10
-    daily_budget: int | None = None
+    model: str = "gemini-3.5-flash-lite"
+    rpm: int = 12
+    daily_budget: int | None = 450
     max_per_run: int = 120
     max_attempts: int = 3
 
