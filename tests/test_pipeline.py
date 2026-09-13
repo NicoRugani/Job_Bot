@@ -1,5 +1,7 @@
 from datetime import timedelta
 
+import pytest
+
 from jobbot.llm.gemini import QuotaExhausted
 from jobbot.models import JobDescription
 from jobbot.pipeline import Deps, RunOptions, run
@@ -292,6 +294,18 @@ def test_outdated_score_waits_when_description_is_unavailable(settings, make_lis
     assert not scorer.prompts and ls.prompt_version != "v-next" and ls.analysis.fit_score == 80
 
 
+def test_outdated_scores_keep_their_tier_until_rescored(settings, make_listing, make_analysis, monkeypatch):
+    deps, _, _ = make_deps([make_listing(1)], FakeScorer([make_analysis(fit_score=70)]))
+    run(settings, RunOptions(), deps)
+    assert State.load(settings.state_path).listings["simplify:1"].tier == "good"
+
+    monkeypatch.setattr("jobbot.pipeline.PROMPT_VERSION", "v-next")
+    settings.config.tiers.good_threshold = 90  # recomputing would demote it to "possible"
+    deps, _, _ = make_deps([make_listing(1)], FakeScorer([]))
+    run(settings, RunOptions(llm_limit=0), deps)
+    assert State.load(settings.state_path).listings["simplify:1"].tier == "good"
+
+
 def test_queue_order(settings, make_listing, make_state):
     from jobbot.pipeline import Run
 
@@ -303,6 +317,37 @@ def test_queue_order(settings, make_listing, make_state):
     backlog.prescore = 95
     outdated = make_state(3, score=85, prompt_version="old")
     assert [ls.id for ls in sorted([backlog, outdated, fresh], key=current_run._queue_order)] == ["simplify:1", "simplify:3", "simplify:2"]
+
+
+class DownNotion(FakeNotion):
+    def __init__(self, error):
+        super().__init__()
+        self.error = error
+        self.attempts = 0
+
+    def create_page(self, data_source_id, properties, children):
+        self.attempts += 1
+        raise self.error
+
+
+def test_notion_outage_is_a_warning_and_progress_is_kept(settings, make_listing, make_analysis):
+    from jobbot.notion import NotionError
+
+    notion = DownNotion(NotionError("timed out", transient=True))
+    listings = [make_listing(i) for i in range(1, 6)]
+    deps, _, _ = make_deps(listings, FakeScorer([make_analysis(fit_score=90)] * 5), notion=notion)
+    report = run(settings, RunOptions(), deps)
+    assert not report.errors and report.warnings and notion.attempts == 3  # gives up after 3 in a row
+    assert len(State.load(settings.state_path).listings) == 5
+    assert all(ls.status == "scored" for ls in State.load(settings.state_path).listings.values())
+
+
+def test_crash_after_scoring_still_saves_scores(settings, make_listing, make_analysis):
+    notion = DownNotion(RuntimeError("unexpected"))
+    deps, _, _ = make_deps([make_listing(1)], FakeScorer([make_analysis(fit_score=90)]), notion=notion)
+    with pytest.raises(RuntimeError):
+        run(settings, RunOptions(), deps)
+    assert State.load(settings.state_path).listings["simplify:1"].status == "scored"
 
 
 def test_llm_limit_caps_calls(settings, make_listing, make_analysis):

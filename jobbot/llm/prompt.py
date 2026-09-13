@@ -32,8 +32,11 @@ Guidelines:
 - Generic items (Git, a CS degree, "problem solving", teamwork) are not evidence of fit; don't list them in matched_skills.
 - Internships expect limited professional experience, so relevant projects and coursework count as real evidence.
 - Distinguish required from preferred qualifications; a missing "nice to have" is a minor gap.
-- Judge eligibility (graduation window or class year, degree level, major, work authorization, clearance) only \
-from explicit statements in the posting. If the posting is silent, answer "unknown" rather than guessing.
+- For the graduation window, only copy the dates the posting states into grad_window_earliest and grad_window_latest; \
+don't judge whether the candidate fits it (that is computed separately). If the posting states only a class standing \
+(e.g. "rising juniors"), leave the dates empty and mention the standing in the eligibility notes.
+- Judge degree level, major, work authorization, and clearance only from explicit statements in the posting. If the \
+posting is silent, answer "unknown" rather than guessing.
 - Location, remote vs in-person, pay, and relocation must not affect fit_score; they are scored separately. \
 Report them from the posting, using "unknown" when it doesn't say. A stated hourly, monthly, or salary range means paid.
 - Only cite skills and requirements that actually appear in the profile or the posting.
@@ -79,7 +82,19 @@ def response_schema() -> dict[str, Any]:
             return [resolve(value) for value in node]
         return node
 
-    return resolve(schema)
+    def require_every_field(node: Any) -> Any:
+        # Fields with defaults (kept so old saved scores load) must still always be returned by the model.
+        if isinstance(node, dict):
+            if "properties" in node:
+                node["required"] = list(node["properties"])
+            for value in node.values():
+                require_every_field(value)
+        elif isinstance(node, list):
+            for value in node:
+                require_every_field(value)
+        return node
+
+    return require_every_field(resolve(schema))
 
 
 # Changes whenever the instructions or output schema change; older scores then get re-scored automatically.

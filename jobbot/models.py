@@ -73,9 +73,17 @@ class JobDescription(BaseModel):
 
 
 class Eligibility(BaseModel):
-    grad_window_ok: YesNoUnknown = Field(
-        description="Does the candidate's expected graduation date/class year satisfy the posting's stated window? "
-        "'unknown' if the posting doesn't say."
+    # Only the dates are extracted; whether the candidate fits the window is computed in scoring.py.
+    # Defaults let scores saved before these fields existed still load (the LLM schema still requires them).
+    grad_window_earliest: str = Field(
+        "",
+        description="Earliest graduation date the posting accepts, as YYYY-MM (e.g. 'graduating December 2027 - June 2028' "
+        "-> '2027-12'). Empty string if the posting gives no dates.",
+    )
+    grad_window_latest: str = Field(
+        "",
+        description="Latest graduation date the posting accepts, as YYYY-MM (e.g. 'December 2027 - June 2028' -> '2028-06', "
+        "'graduating by summer 2027' -> '2027-08'). Empty string if the posting gives no dates.",
     )
     degree_ok: YesNoUnknown = Field(
         description="Does the candidate's degree level/major satisfy the posting (e.g. 'no' for PhD- or Masters-only roles)?"

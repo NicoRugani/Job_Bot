@@ -67,6 +67,10 @@ def cmd_run(settings: Settings, args: argparse.Namespace) -> int:
         print("\n(dry run: state not saved, nothing written to Notion, no notifications)")
     else:
         print(f"\nNotion writes: {report.notion_writes}. Notifications: {report.notified}.")
+    for warning in report.warnings:
+        print(f"WARNING: {warning}")
+        if os.environ.get("GITHUB_ACTIONS"):
+            print(f"::warning title=Job bot::{warning}")
     for error in report.errors:
         print(f"ERROR: {error}", file=sys.stderr)
     return 1 if report.errors else 0
@@ -147,7 +151,9 @@ def cmd_test_notify(settings: Settings, args: argparse.Namespace) -> int:
             matched_skills=["React", "JavaScript"],
             gaps=[],
             red_flags=[],
-            eligibility=Eligibility(grad_window_ok="yes", degree_ok="yes", notes="Open to 2028 graduates."),
+            eligibility=Eligibility(
+                grad_window_earliest="2027-12", grad_window_latest="2028-06", degree_ok="yes", notes="Open to Dec 2027 - Jun 2028 graduates."
+            ),
             work_mode="onsite",
             paid="paid",
             pay_text="$45-55/hr",

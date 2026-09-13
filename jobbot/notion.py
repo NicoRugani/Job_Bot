@@ -60,9 +60,10 @@ DATABASE_PROPERTIES: dict[str, dict] = {
 
 
 class NotionError(Exception):
-    def __init__(self, message: str, status: int | None = None):
+    def __init__(self, message: str, status: int | None = None, transient: bool = False):
         super().__init__(message)
         self.status = status
+        self.transient = transient  # timeouts, outages: worth retrying on a later run
 
 
 def page_id_from(value: str) -> str:
@@ -82,7 +83,7 @@ class NotionClient:
         sleep: Callable[[float], None] = time.sleep,
         clock: Callable[[], float] = time.monotonic,
     ):
-        self.client = client or httpx.Client(base_url=API_URL, timeout=30)
+        self.client = client or httpx.Client(base_url=API_URL, timeout=45)
         self.headers = {"Authorization": f"Bearer {token}", "Notion-Version": NOTION_VERSION}
         self.min_interval = 1.0 / requests_per_second
         self.sleep = sleep
@@ -93,18 +94,31 @@ class NotionClient:
         self, method: str, path: str, body: dict | None = None, *, params: dict | None = None, version: str = NOTION_VERSION
     ) -> dict[str, Any]:
         headers = {**self.headers, "Notion-Version": version}
+        # Reads and updates are safe to repeat after a network error. A create that timed out may have gone
+        # through, so it isn't repeated; the next run finds that row by its Listing ID instead of duplicating it.
+        repeatable = method in ("GET", "PATCH", "DELETE") or path.endswith("/query")
         for attempt in range(5):
             if self._last is not None and (wait := self.min_interval - (self.clock() - self._last)) > 0:
                 self.sleep(wait)
             self._last = self.clock()
-            response = self.client.request(method, path, json=body, params=params, headers=headers)
+            try:
+                response = self.client.request(method, path, json=body, params=params, headers=headers)
+            except httpx.TransportError as e:
+                if not repeatable or attempt >= 2:
+                    raise NotionError(f"{method} {path} failed: {e!r}", transient=True) from e
+                self.sleep(5.0 * (attempt + 1))
+                continue
             if response.status_code == 429 or response.status_code >= 500:
-                self.sleep(float(response.headers.get("Retry-After", 2**attempt)))
+                try:
+                    delay = float(response.headers.get("Retry-After", 2**attempt))
+                except ValueError:
+                    delay = float(2**attempt)
+                self.sleep(delay)
                 continue
             if response.is_error:
                 raise NotionError(f"{method} {path} -> {response.status_code}: {response.text[:500]}", response.status_code)
             return response.json()
-        raise NotionError(f"{method} {path} failed after retries")
+        raise NotionError(f"{method} {path} failed after retries", transient=True)
 
     def create_database(self, parent_page_id: str, title: str) -> tuple[str, str]:
         data = self.request(

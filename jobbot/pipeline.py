@@ -29,7 +29,7 @@ from .notion import (
     sync_listing,
 )
 from .prefilter import Prescorer, TitleClassifier
-from .profile import profile_embedding_text, profile_keywords, profile_prompt_block
+from .profile import expected_graduation, profile_embedding_text, profile_keywords, profile_prompt_block
 from .scoring import final_score, tier_for
 from .sources.ats_watchlist import fetch_watchlist
 from .sources.simplify import fetch_simplify
@@ -67,6 +67,7 @@ class RunReport:
     notion_writes: int = 0
     notified: int = 0
     errors: list[str] = field(default_factory=list)
+    warnings: list[str] = field(default_factory=list)  # temporary problems; the next run picks up where this one stopped
 
 
 @dataclass
@@ -119,24 +120,28 @@ class Run:
         self.report = RunReport()
         self.jds: dict[str, JobDescription | None] = {}
         self.locations = LocationRules(self.cfg.location)
+        self.graduation = expected_graduation(settings.profile)
 
     def execute(self) -> RunReport:
         headers = {"User-Agent": USER_AGENT}
-        with httpx.Client(headers=headers, follow_redirects=True, timeout=self.cfg.jd.timeout_seconds) as client:
-            self.ingest(self.deps.fetch_listings(self.settings, client))
-            self.apply_location_rules()
-            fetcher = self.deps.jd_fetcher(self.settings, client)
-            self.prescore(fetcher)
-            self.score(fetcher)
-        self.report.pending = sum(1 for ls in self.state.listings.values() if ls.active and ls.status == "pending")
-        if self.options.dry_run:
-            return self.report
-        self.sync_notion()
-        if self.options.notify:
-            self.notify()
-        if self.report.pending == 0:
-            self.state.backfill_complete = True
-        self.save()
+        try:
+            with httpx.Client(headers=headers, follow_redirects=True, timeout=self.cfg.jd.timeout_seconds) as client:
+                self.ingest(self.deps.fetch_listings(self.settings, client))
+                self.apply_location_rules()
+                fetcher = self.deps.jd_fetcher(self.settings, client)
+                self.prescore(fetcher)
+                self.score(fetcher)
+            self.report.pending = sum(1 for ls in self.state.listings.values() if ls.active and ls.status == "pending")
+            if self.options.dry_run:
+                return self.report
+            self.sync_notion()
+            if self.options.notify:
+                self.notify()
+            if self.report.pending == 0:
+                self.state.backfill_complete = True
+        finally:
+            if not self.options.dry_run:
+                self.save()  # keep whatever got done, even if a later stage crashed
         return self.report
 
     def save(self) -> None:
@@ -193,7 +198,9 @@ class Run:
                 continue
             if excluded_by_location:  # the rule was relaxed
                 ls.status, ls.filter_reason = ("scored" if ls.analysis else "pending"), None
-            if ls.status == "scored" and ls.analysis is not None:
+            # Outdated scores keep their stored tier until re-scored: recomputing them under new rules could
+            # promote (and notify) a listing based on an analysis that's about to be replaced.
+            if ls.status == "scored" and ls.analysis is not None and not self._outdated(ls):
                 ls.final_score, ls.tier = self._score(ls.analysis, verdict.bonus)
 
     def prescore(self, fetcher: JDFetcher) -> None:
@@ -308,16 +315,24 @@ class Run:
         except NotionError as e:
             self.report.errors.append(f"Couldn't read or update the Notion database: {e}")
             return  # creating pages blind could duplicate rows
+        network_failures = 0
         for ls in sorted(targets, key=lambda ls: -(ls.final_score or 0)):
             try:
                 if ls.status == "filtered":
                     self.report.notion_writes += int(self._retire_row(notion, ls))
-                    continue
-                self.report.notion_writes += int(sync_listing(notion, secrets.notion_data_source_id, ls))
+                else:
+                    self.report.notion_writes += int(sync_listing(notion, secrets.notion_data_source_id, ls))
+                network_failures = 0
             except NotionError as e:
-                self.report.errors.append(f"Notion sync failed for {ls.id}: {e}")
-                if e.status in (401, 403):
-                    break  # token or sharing problem; every page would fail
+                if not e.transient:
+                    self.report.errors.append(f"Notion sync failed for {ls.id}: {e}")
+                    if e.status in (401, 403):
+                        break  # token or sharing problem; every page would fail
+                    continue
+                network_failures += 1
+                if network_failures >= 3:
+                    self.report.warnings.append(f"Notion isn't responding ({e}); the remaining rows sync on the next run")
+                    break
 
     def notify(self) -> None:
         cfg = self.cfg.notify
@@ -389,7 +404,7 @@ class Run:
         return bucket, -(rank or 0), -(ls.date_posted.timestamp() if ls.date_posted else 0)
 
     def _score(self, analysis: FitAnalysis, location_bonus: float) -> tuple[int, Tier | None]:
-        score = final_score(analysis, self.cfg.scoring, location_bonus)
+        score = final_score(analysis, self.cfg.scoring, location_bonus, self.graduation)
         return score, tier_for(score, self.cfg.tiers)
 
     def _retire_row(self, notion: NotionClient, ls: ListingState) -> bool:

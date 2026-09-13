@@ -2,9 +2,16 @@
 
 from __future__ import annotations
 
+import re
 from typing import Any
 
 import yaml
+
+
+def expected_graduation(profile: dict[str, Any]) -> tuple[int, int] | None:
+    """(year, month) from education.expected_graduation, e.g. "2028-05"."""
+    match = re.match(r"(\d{4})-(\d{1,2})", str((profile.get("education") or {}).get("expected_graduation") or ""))
+    return (int(match.group(1)), int(match.group(2))) if match else None
 
 
 def profile_keywords(profile: dict[str, Any]) -> list[str]:

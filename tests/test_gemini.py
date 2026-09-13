@@ -87,8 +87,15 @@ def test_bad_request_is_config_error():
 
 def test_schema_is_self_contained():
     schema = json.dumps(response_schema())
-    assert "$ref" not in schema and "$defs" not in schema and "grad_window_ok" in schema
+    assert "$ref" not in schema and "$defs" not in schema and "grad_window_earliest" in schema
     assert list(response_schema()["properties"])[-1] == "fit_score"  # evidence before the verdict
+
+
+def test_schema_requires_every_field():
+    schema = response_schema()
+    assert set(schema["required"]) == set(schema["properties"])
+    eligibility = schema["properties"]["eligibility"]
+    assert set(eligibility["required"]) == {"grad_window_earliest", "grad_window_latest", "degree_ok", "notes"}
 
 
 def test_prompt_puts_profile_first_and_flags_missing_jd(make_state):

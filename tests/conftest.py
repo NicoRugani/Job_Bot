@@ -35,7 +35,7 @@ def make_analysis() -> Callable[..., FitAnalysis]:
             matched_skills=["React", "JavaScript"],
             gaps=["Kubernetes"],
             red_flags=[],
-            eligibility=Eligibility(grad_window_ok="yes", degree_ok="yes", notes="Open to 2028 graduates."),
+            eligibility=Eligibility(grad_window_earliest="", grad_window_latest="", degree_ok="yes", notes="Open to 2028 graduates."),
             work_mode="onsite",
             paid="paid",
             pay_text="$40/hr",

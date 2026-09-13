@@ -15,6 +15,22 @@ def test_state_round_trip(tmp_path, make_state):
     assert State.load(tmp_path / "missing.json") == State()
 
 
+def test_scores_saved_in_the_old_format_still_load(tmp_path, make_state):
+    import json
+
+    state = State()
+    ls = make_state(1)
+    state.listings[ls.id] = ls
+    path = tmp_path / "state.json"
+    state.save(path)
+    raw = json.loads(path.read_text())
+    eligibility = raw["listings"]["simplify:1"]["analysis"]["eligibility"]
+    del eligibility["grad_window_earliest"], eligibility["grad_window_latest"]
+    eligibility["grad_window_ok"] = "no"  # field from before graduation dates were extracted
+    path.write_text(json.dumps(raw))
+    assert State.load(path).listings["simplify:1"].analysis.eligibility.grad_window_earliest == ""
+
+
 def test_llm_call_counter_prunes_old_days():
     state = State()
     now = datetime(2026, 9, 12, 12, tzinfo=timezone.utc)

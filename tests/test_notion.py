@@ -152,6 +152,25 @@ def test_setup_views_creates_missing_views_with_column_ids():
     assert len(changes) == 5
 
 
+def test_network_errors_retry_updates_but_not_creates():
+    calls = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        calls.append(request.method)
+        if request.method == "PATCH" and calls.count("PATCH") == 1:
+            raise httpx.ReadTimeout("slow", request=request)
+        if request.method == "POST":
+            raise httpx.ReadTimeout("slow", request=request)
+        return httpx.Response(200, json={"id": "p1"})
+
+    client = NotionClient("secret", client=httpx.Client(base_url=API_URL, transport=httpx.MockTransport(handler)), sleep=lambda s: None)
+    assert client.update_page("p1", {}) == {"id": "p1"}
+    assert calls == ["PATCH", "PATCH"]
+    with pytest.raises(NotionError) as error:
+        client.create_page("ds-1", {}, [])
+    assert error.value.transient and calls.count("POST") == 1  # a create that may have gone through isn't repeated
+
+
 def test_page_untouched():
     fresh = {"Status": {"select": {"name": "New"}}, "Notes": {"rich_text": []}, "Applied on": {"date": None}}
     assert page_untouched({"properties": fresh})
