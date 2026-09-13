@@ -16,7 +16,7 @@ from .llm.gemini import GeminiScorer, InvalidResponse, LLMConfigError, ScoringPa
 from .llm.prompt import build_user_prompt
 from .models import FitAnalysis, JobDescription, Listing, normalize_text
 from .notify import Notifier, digest_payload, match_payload
-from .notion import NotionClient, NotionError, sync_listing
+from .notion import TIER_LABEL, ExistingPage, NotionClient, NotionError, existing_pages_by_listing, sync_listing
 from .prefilter import Prescorer, TitleClassifier
 from .profile import profile_embedding_text, profile_keywords, profile_prompt_block
 from .scoring import final_score, tier_for
@@ -264,6 +264,12 @@ class Run:
             log.warning("Notion is enabled but NOTION_TOKEN / NOTION_DATA_SOURCE_ID are not set; skipping")
             return
         notion = self.deps.notion(self.settings)
+        if any(not ls.notion_page_id for ls in targets):
+            try:
+                self._adopt_existing_rows(existing_pages_by_listing(notion, secrets.notion_data_source_id), targets)
+            except NotionError as e:
+                self.report.errors.append(f"Couldn't read existing Notion rows: {e}")
+                return  # creating pages blind could duplicate rows
         for ls in sorted(targets, key=lambda ls: -(ls.final_score or 0)):
             try:
                 self.report.notion_writes += int(sync_listing(notion, secrets.notion_data_source_id, ls))
@@ -305,6 +311,16 @@ class Run:
             self.report.errors.append(f"ntfy publish failed: {e}")
 
     # --- helpers ----------------------------------------------------------------------------------
+
+    def _adopt_existing_rows(self, existing: dict[str, ExistingPage], targets: list[ListingState]) -> None:
+        """Reuse rows created by a run whose state never got saved, instead of creating duplicates."""
+        for ls in targets:
+            page = existing.get(ls.id)
+            if ls.notion_page_id or page is None:
+                continue
+            ls.notion_page_id, ls.notion_url = page.page_id, page.url
+            if page.tier_label == TIER_LABEL["strong"] and ls.tier == "strong" and ls.notified_at is None:
+                ls.notified_at = self.now  # it was pushed when that row was created
 
     @staticmethod
     def _content_key(ls: ListingState) -> str:

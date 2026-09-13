@@ -41,8 +41,12 @@ class FakeScorer:
 
 
 class FakeNotion:
-    def __init__(self):
+    def __init__(self, existing=()):
         self.created, self.updated = [], []
+        self.existing = list(existing)
+
+    def query_data_source(self, data_source_id):
+        return self.existing
 
     def create_page(self, data_source_id, properties, children):
         self.created.append(properties)
@@ -177,6 +181,28 @@ def test_low_prescore_only_filters_non_core_roles(settings, make_listing, make_a
     state = State.load(settings.state_path)
     assert state.listings["simplify:1"].status == "scored"
     assert state.listings["simplify:2"].status == "filtered"
+
+
+def notion_row(listing_id, tier):
+    return {"id": "page-old", "url": "https://www.notion.so/old", "properties": {
+        "Listing ID": {"rich_text": [{"plain_text": listing_id}]}, "Tier": {"select": {"name": tier}}}}
+
+
+def test_rows_from_a_lost_run_are_updated_not_duplicated(settings, make_listing, make_analysis):
+    notion = FakeNotion(existing=[notion_row("simplify:1", "🔥 Strong")])
+    deps, _, notifier = make_deps([make_listing(1)], FakeScorer([make_analysis(fit_score=95, relocation_assistance="yes")]), notion=notion)
+    run(settings, RunOptions(), deps)
+    ls = State.load(settings.state_path).listings["simplify:1"]
+    assert not notion.created and notion.updated[0][0] == "page-old"
+    assert ls.notion_page_id == "page-old" and ls.notified_at is not None
+    assert not notifier.sent  # already pushed when that row was created
+
+
+def test_adopted_row_that_becomes_strong_still_notifies(settings, make_listing, make_analysis):
+    notion = FakeNotion(existing=[notion_row("simplify:1", "✅ Good")])
+    deps, _, notifier = make_deps([make_listing(1)], FakeScorer([make_analysis(fit_score=95, relocation_assistance="yes")]), notion=notion)
+    run(settings, RunOptions(), deps)
+    assert not notion.created and len(notifier.sent) == 1
 
 
 def test_llm_limit_caps_calls(settings, make_listing, make_analysis):

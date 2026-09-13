@@ -21,7 +21,10 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 45
     steps:
+      # Always start from the latest code and state, even when re-running an older run.
       - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.repository.default_branch }}
 
       - uses: actions/setup-python@v5
         with:
@@ -47,13 +50,25 @@ jobs:
         run: python -m jobbot run ${LIMIT:+--limit "$LIMIT"}
 
       # Runs even if the bot reported errors, so progress (scores, Notion page ids, sent notifications) is kept.
+      # state.json is only written by the bot, so this run's copy replaces the branch's copy wholesale
+      # (a line-by-line merge of two JSON snapshots conflicts or corrupts the file).
       - name: Commit state
         if: always()
+        env:
+          BRANCH: ${{ github.event.repository.default_branch }}
         run: |
+          [ -f data/state.json ] || exit 0
           git config user.name "jobbot"
           git config user.email "jobbot@users.noreply.github.com"
-          git add data/state.json 2>/dev/null || exit 0
-          git diff --cached --quiet && exit 0
-          git commit -m "Update job bot state"
-          git pull --rebase
-          git push
+          cp data/state.json "$RUNNER_TEMP/state.json"
+          for attempt in 1 2 3; do
+            git fetch --quiet origin "$BRANCH"
+            git reset --quiet --hard "origin/$BRANCH"
+            cp "$RUNNER_TEMP/state.json" data/state.json
+            git add data/state.json
+            if git diff --cached --quiet; then exit 0; fi
+            git commit --quiet -m "Update job bot state"
+            if git push --quiet origin "HEAD:$BRANCH"; then exit 0; fi
+            sleep 5
+          done
+          exit 1

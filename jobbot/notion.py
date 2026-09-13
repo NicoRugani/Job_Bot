@@ -7,6 +7,7 @@ import json
 import re
 import time
 from collections.abc import Callable
+from dataclasses import dataclass
 from typing import Any
 
 import httpx
@@ -120,6 +121,38 @@ class NotionClient:
 
     def update_page(self, page_id: str, properties: dict) -> dict[str, Any]:
         return self.request("PATCH", f"/pages/{page_id}", {"properties": properties})
+
+    def query_data_source(self, data_source_id: str) -> list[dict[str, Any]]:
+        pages: list[dict[str, Any]] = []
+        cursor = None
+        while True:
+            body: dict[str, Any] = {"page_size": 100}
+            if cursor:
+                body["start_cursor"] = cursor
+            data = self.request("POST", f"/data_sources/{data_source_id}/query", body)
+            pages.extend(data.get("results", []))
+            if not data.get("has_more"):
+                return pages
+            cursor = data.get("next_cursor")
+
+
+@dataclass
+class ExistingPage:
+    page_id: str
+    url: str | None
+    tier_label: str | None
+
+
+def existing_pages_by_listing(notion: NotionClient, data_source_id: str) -> dict[str, ExistingPage]:
+    """Rows already in the database, keyed by their Listing ID property."""
+    index: dict[str, ExistingPage] = {}
+    for page in notion.query_data_source(data_source_id):
+        props = page.get("properties") or {}
+        listing_id = "".join(t.get("plain_text", "") for t in (props.get("Listing ID") or {}).get("rich_text", []))
+        if listing_id:
+            tier = ((props.get("Tier") or {}).get("select") or {}).get("name")
+            index[listing_id] = ExistingPage(page["id"], page.get("url"), tier)
+    return index
 
 
 def _text(value: str) -> list[dict]:

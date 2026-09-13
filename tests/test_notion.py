@@ -3,7 +3,7 @@ import json
 import httpx
 import pytest
 
-from jobbot.notion import API_URL, NotionClient, NotionError, bot_properties, page_id_from, sync_listing
+from jobbot.notion import API_URL, NotionClient, NotionError, bot_properties, existing_pages_by_listing, page_id_from, sync_listing
 
 
 class FakeNotion:
@@ -68,6 +68,24 @@ def test_client_retries_rate_limits_and_creates_database():
     body = json.loads(last.content)
     assert body["parent"] == {"type": "page_id", "page_id": "abc"}
     assert body["initial_data_source"]["properties"]["Role"] == {"title": {}}
+
+
+def test_existing_rows_are_indexed_across_pages():
+    responses = [
+        {"results": [{"id": "p1", "url": "u1", "properties": {"Listing ID": {"rich_text": [{"plain_text": "simplify:1"}]},
+                                                                "Tier": {"select": {"name": "🔥 Strong"}}}}], "has_more": True, "next_cursor": "c2"},
+        {"results": [{"id": "p2", "url": "u2", "properties": {"Listing ID": {"rich_text": []}, "Tier": {"select": None}}}], "has_more": False},
+    ]
+    bodies = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        bodies.append(json.loads(request.content))
+        return httpx.Response(200, json=responses[len(bodies) - 1])
+
+    client = NotionClient("secret", client=httpx.Client(base_url=API_URL, transport=httpx.MockTransport(handler)), sleep=lambda s: None)
+    index = existing_pages_by_listing(client, "ds-1")
+    assert list(index) == ["simplify:1"] and index["simplify:1"].page_id == "p1" and index["simplify:1"].tier_label == "🔥 Strong"
+    assert "start_cursor" not in bodies[0] and bodies[1]["start_cursor"] == "c2"
 
 
 def test_page_id_from_url():
