@@ -60,12 +60,30 @@ def test_chunk_text_covers_whole_text():
     assert chunk_text("short") == ["short"]
 
 
-def test_prescorer_keyword_only_mode(profile):
-    from jobbot.profile import profile_embedding_text, profile_keywords
-
+def test_prescorer_keyword_only_mode():
+    keywords = ["React", "JavaScript", "TypeScript", "Figma"]
+    embedding_text = "front-end web development with React and TypeScript"
     cfg = PrefilterConfig(use_embeddings=False, keyword_saturation=4)
-    prescorer = Prescorer(cfg, profile_keywords(profile), profile_embedding_text(profile))
+    prescorer = Prescorer(cfg, keywords, embedding_text)
     relevant = prescorer.score("Frontend Intern", "Build React components in JavaScript and TypeScript with Figma designs.", 1.0)
     irrelevant = prescorer.score("Mechanical Intern", "SolidWorks CAD and tolerance analysis.", 1.0)
     assert relevant == 100 and irrelevant == 0
     assert prescorer.score("Frontend Intern", "React JavaScript TypeScript Figma", 0.5) == 50
+
+
+def test_profile_views_feed_the_prescorer():
+    from jobbot.profile import profile_embedding_text, profile_keywords
+
+    profile = {
+        "keywords": ["front-end"],
+        "skills": {"languages": ["JavaScript"], "frameworks": ["React"]},
+        "target_roles": ["Front-end internships"],
+        "projects": [{"name": "Thing", "summary": "Built a thing.", "stack": ["React"]}],
+        "education": {"coursework": ["Human-Computer Interaction"]},
+    }
+    assert profile_keywords(profile) == ["front-end", "JavaScript", "React"]
+    text = profile_embedding_text(profile)
+    assert "Front-end internships" in text
+    assert "languages: JavaScript" in text
+    assert "Thing: Built a thing. (React)" in text
+    assert "Human-Computer Interaction" in text

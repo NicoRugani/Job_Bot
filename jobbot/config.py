@@ -175,8 +175,20 @@ class Settings:
         return self.root / self.config.state_path
 
 
+def profile_path(root: Path = ROOT) -> Path:
+    """Your own profile if you have one, else the committed template.
+
+    profile/profile.yaml is gitignored: it describes a specific person and is pasted
+    into every Gemini prompt, so only profile.example.yaml ships in the repo. Falling
+    back keeps a fresh clone and the test suite runnable, but template scores are
+    meaningless, so copy the template and fill it in before trusting any output.
+    """
+    mine = root / "profile" / "profile.yaml"
+    return mine if mine.exists() else root / "profile" / "profile.example.yaml"
+
+
 def load_settings(root: Path = ROOT) -> Settings:
     load_dotenv(root / ".env")
     config = Config.model_validate(yaml.safe_load((root / "config.yaml").read_text()))
-    profile = yaml.safe_load((root / "profile" / "profile.yaml").read_text())
+    profile = yaml.safe_load(profile_path(root).read_text())
     return Settings(root, config, profile, Secrets.from_env())

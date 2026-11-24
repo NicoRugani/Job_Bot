@@ -53,10 +53,13 @@ def test_degree_and_term_problems_cap_the_score(config, make_analysis):
     assert final_score(make_analysis(fit_score=20, matches_target_term=False), config.scoring) < cap
 
 
-def test_expected_graduation_from_profile(profile):
+def test_expected_graduation_from_profile():
     from jobbot.profile import expected_graduation
 
-    assert expected_graduation(profile) == (2028, 5)
+    assert expected_graduation({"education": {"expected_graduation": "2028-05"}}) == (2028, 5)
+    assert expected_graduation({"education": {"expected_graduation": "2027-5"}}) == (2027, 5)
+    assert expected_graduation({"education": {"expected_graduation": "whenever"}}) is None
+    assert expected_graduation({"education": {}}) is None
     assert expected_graduation({}) is None
 
 

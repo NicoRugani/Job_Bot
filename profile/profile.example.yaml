@@ -1,0 +1,62 @@
+# Candidate profile template. Copy this to profile/profile.yaml and fill it in with
+# your own details:
+#
+#     cp profile/profile.example.yaml profile/profile.yaml
+#
+# profile/profile.yaml is gitignored, because it describes a specific person and is
+# sent to Gemini on every scoring call. Only this template is committed. Keep your
+# name, email, phone and address out of both files: nothing here needs them, and the
+# whole file is pasted into the LLM prompt.
+#
+# The bot falls back to this template when profile/profile.yaml is absent, so the
+# test suite and a fresh clone both run without it. Scores from the template are
+# meaningless, so fill in your own copy before trusting any output.
+
+education:
+  school: Your University (City, ST)
+  degrees:
+    - B.S. Your Major
+  level: Undergraduate (bachelor's)
+  gpa: 0.00
+  started: 2024-08
+  # Parsed by jobbot/profile.py to check a posting's graduation window. Keep YYYY-MM.
+  expected_graduation: 2028-05
+  standing_during_summer_2027: Rising senior (just finished junior year)
+  coursework:
+    - Course that is relevant to the roles you want
+    - Another relevant course
+
+# e.g. "US citizen", "US permanent resident", or "Needs visa sponsorship".
+# Matters for defense and clearance roles, which otherwise score as a false positive.
+work_authorization: 'Describe your work authorization'
+
+target_roles:
+  - The kind of internship you actually want, in a sentence
+  - A second role type, if you are open to one
+
+skills:
+  languages: [Language, Another language]
+  frameworks: [Framework, Another framework]
+  design: [Tool, Method]
+  tools: [Git, Anything else you really use]
+
+projects:
+  - name: Project name (year)
+    stack: [Language, Framework]
+    summary: >-
+      What it does, what you specifically built, and which parts are worth a
+      recruiter's attention. Two or three sentences is plenty.
+
+experience:
+  - role: Job title, Employer
+    summary: What you did, and one concrete result if you have one.
+  - note: Say so plainly if you have no industry experience yet.
+
+# Extra terms, beyond the skills above, that make a posting look more relevant during
+# the free keyword pre-filter. Lowercase, and include the spelling variants you expect
+# to see in job titles.
+keywords:
+  - front-end
+  - frontend
+  - full-stack
+  - web

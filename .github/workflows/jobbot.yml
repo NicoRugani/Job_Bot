@@ -13,15 +13,16 @@ concurrency:
   group: jobbot
   cancel-in-progress: false
 
+# The repo is public and run state no longer lives in it, so this job only reads code.
 permissions:
-  contents: write
+  contents: read
 
 jobs:
   run:
     runs-on: ubuntu-latest
     timeout-minutes: 45
     steps:
-      # Always start from the latest code and state, even when re-running an older run.
+      # Always start from the latest code, even when re-running an older run.
       - uses: actions/checkout@v4
         with:
           ref: ${{ github.event.repository.default_branch }}
@@ -34,11 +35,46 @@ jobs:
       - name: Install dependencies
         run: pip install -r requirements.txt
 
+      # profile/profile.yaml is gitignored, so the runner has to be handed it. Without
+      # this the bot silently falls back to profile.example.yaml and scores every posting
+      # against placeholder skills: the run looks healthy and every alert is meaningless.
+      # Set it with:
+      #   base64 -i profile/profile.yaml | tr -d '\n' | gh secret set PROFILE_YAML_B64
+      - name: Restore profile
+        env:
+          PROFILE_YAML_B64: ${{ secrets.PROFILE_YAML_B64 }}
+        run: |
+          if [ -z "${PROFILE_YAML_B64}" ]; then
+            echo "::error::PROFILE_YAML_B64 is not set; refusing to score against the template."
+            exit 1
+          fi
+          printf '%s' "${PROFILE_YAML_B64}" | base64 -d > profile/profile.yaml
+          python -c "import sys,yaml; p=yaml.safe_load(open('profile/profile.yaml')); sys.exit('PROFILE_YAML_B64 did not decode to a usable profile' if not isinstance(p, dict) or not p.get('skills') else 0)"
+
       - name: Cache embedding model
         uses: actions/cache@v4
         with:
           path: ~/.cache/fastembed
           key: fastembed-bge-small-en-v1.5
+
+      # Run state lives in the Actions cache rather than the repo, because state.json
+      # carries the Gemini fit analysis for every posting. Caches are immutable, so each
+      # run writes its own key and restore-keys picks up the newest earlier one.
+      - name: Restore run state
+        uses: actions/cache/restore@v4
+        with:
+          path: data
+          key: jobbot-state-${{ github.run_id }}-${{ github.run_attempt }}
+          restore-keys: |
+            jobbot-state-
+
+      - name: Report restored state
+        run: |
+          if [ -f data/state.json ]; then
+            python -c "import json; d=json.load(open('data/state.json')); print('state restored:', len(d['listings']), 'listings,', sum(1 for v in d['listings'].values() if v.get('analysis')), 'scored')"
+          else
+            echo "::warning::No cached state found; this run starts from scratch and will work through the backlog again."
+          fi
 
       - name: Run bot
         env:
@@ -49,26 +85,11 @@ jobs:
           LIMIT: ${{ inputs.limit }}
         run: python -m jobbot run ${LIMIT:+--limit "$LIMIT"}
 
-      # Runs even if the bot reported errors, so progress (scores, Notion page ids, sent notifications) is kept.
-      # state.json is only written by the bot, so this run's copy replaces the branch's copy wholesale
-      # (a line-by-line merge of two JSON snapshots conflicts or corrupts the file).
-      - name: Commit state
+      # Saved even when the bot errored, so this run's scores, Notion page ids and sent
+      # notifications survive instead of being redone next time.
+      - name: Save run state
         if: always()
-        env:
-          BRANCH: ${{ github.event.repository.default_branch }}
-        run: |
-          [ -f data/state.json ] || exit 0
-          git config user.name "jobbot"
-          git config user.email "jobbot@users.noreply.github.com"
-          cp data/state.json "$RUNNER_TEMP/state.json"
-          for attempt in 1 2 3; do
-            git fetch --quiet origin "$BRANCH"
-            git reset --quiet --hard "origin/$BRANCH"
-            cp "$RUNNER_TEMP/state.json" data/state.json
-            git add data/state.json
-            if git diff --cached --quiet; then exit 0; fi
-            git commit --quiet -m "Update job bot state"
-            if git push --quiet origin "HEAD:$BRANCH"; then exit 0; fi
-            sleep 5
-          done
-          exit 1
+        uses: actions/cache/save@v4
+        with:
+          path: data
+          key: jobbot-state-${{ github.run_id }}-${{ github.run_attempt }}

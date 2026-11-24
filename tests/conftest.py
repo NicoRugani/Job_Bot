@@ -6,7 +6,7 @@ from datetime import datetime, timezone
 import pytest
 import yaml
 
-from jobbot.config import ROOT, Config, Secrets, Settings
+from jobbot.config import ROOT, Config, Secrets, Settings, profile_path
 from jobbot.models import Eligibility, FitAnalysis, Listing
 from jobbot.state import ListingState
 
@@ -18,7 +18,7 @@ def config() -> Config:
 
 @pytest.fixture
 def profile() -> dict:
-    return yaml.safe_load((ROOT / "profile" / "profile.yaml").read_text())
+    return yaml.safe_load(profile_path(ROOT).read_text())
 
 
 @pytest.fixture

@@ -56,8 +56,16 @@ cp .env.example .env
 pytest -q
 ```
 
-### 2. Review your profile
-`profile/profile.yaml` was drafted from your resume, without name or contact info, since it's sent to Gemini and committed to the repo. Check it, and fill in `work_authorization`; it matters for defense and clearance roles.
+### 2. Create your profile
+The repo ships a blank template, not anybody's real profile. Copy it and fill it in:
+
+```bash
+cp profile/profile.example.yaml profile/profile.yaml
+```
+
+Everything the bot knows about you lives in that one file: degree, graduation window, skills, target roles, projects and experience. Work through it properly, because it is the entire basis for every fit score, and fill in `work_authorization`, which decides whether defense and clearance roles score as false positives.
+
+`profile/profile.yaml` is gitignored on purpose. It is pasted into every Gemini prompt and would otherwise be published with the repo, so keep your name, email, phone and address out of it; nothing here needs them. If the file is missing the bot falls back to the template, which keeps a fresh clone and `pytest` working, but template scores are meaningless.
 
 ### 3. Gemini API key (free)
 1. Create a key at [aistudio.google.com/apikey](https://aistudio.google.com/apikey) and put it in `.env` as `GEMINI_API_KEY`.
@@ -103,9 +111,18 @@ python -m jobbot show                       # tracked listings from saved state
 ```
 
 ### 7. Schedule it on GitHub Actions
-1. Push this folder to a **private** GitHub repo.
+1. Push this folder to a GitHub repo. It can be public: neither your profile nor the run state is committed.
 2. Add the 4 values from `.env` as repository secrets: **Settings → Secrets and variables → Actions**, or with `gh secret set GEMINI_API_KEY` and so on.
-3. **Actions → jobbot → Run workflow** starts a run now. After that it runs every 3 hours and commits `data/state.json` back to the repo.
+3. Add your profile as a fifth secret. `profile/profile.yaml` is gitignored, so the runner has to be handed it:
+   ```bash
+   base64 -i profile/profile.yaml | tr -d '\n' | gh secret set PROFILE_YAML_B64
+   ```
+   Re-run that command whenever you edit your profile, otherwise the scheduled runs keep scoring against the old one. The workflow fails fast if the secret is missing, rather than quietly scoring you against `profile.example.yaml`.
+4. **Actions → jobbot → Run workflow** starts a run now. After that it runs every 3 hours.
+
+**Where run state lives.** `data/state.json` is kept in the GitHub Actions cache, not in the repo, because it holds the fit analysis for every posting you have ever been scored against. Each run restores the newest `jobbot-state-` cache, and saves its own at the end even if the run failed. Caches are evicted after 7 days without a read, which a 3-hourly schedule never hits, and GitHub drops the least recently used once a repo passes 10 GB.
+
+If the cache is ever lost the next run starts from an empty state and says so in the log. Nothing breaks and nothing is duplicated: rows already in Notion are adopted by their **Listing ID**, and anything you have already been pushed or already moved off **New** is marked as notified instead of being pushed again. The only real cost is re-scoring the backlog, which is capped by `llm.daily_budget` and takes a few days.
 
 The first backfill of existing listings may take a few runs if the free Gemini quota runs out. Unscored listings stay pending and are retried, best matches first.
 

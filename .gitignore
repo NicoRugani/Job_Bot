@@ -4,7 +4,19 @@ __pycache__/
 .pytest_cache/
 .DS_Store
 .env
-# Resume stays local; only the PII-free profile.yaml is committed.
+
+# Your own details stay local. Both of these describe a specific person, and
+# profile.yaml is pasted into every Gemini prompt. Only profile.example.yaml,
+# the blank template, is committed.
 profile/*.pdf
-data/*.tmp
+profile/profile.yaml
+
+# Run state stays local. state.json holds the Gemini fit analysis for every posting,
+# which reads as a public critique of the candidate, plus Notion page ids for a
+# private workspace. Neither belongs in a public repo.
+data/
+
 larp-alert/
+
+# Editor and tool noise
+.Rhistory
